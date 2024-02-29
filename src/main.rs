@@ -1,4 +1,4 @@
-use std::{ffi::{c_char, CStr, CString}, fmt::Display, fs::File, io::Read, path::Path};
+use std::{ffi::{c_char, CStr, CString}, fmt::Display, fs::File, io::{Read, Write}, path::Path};
 
 use clap::Parser;
 
@@ -299,8 +299,21 @@ where
             ImageVersion::V2 => (item_info_ptr as *const AmlCItemInfoV2).into(),
             ImageVersion::V3 => ItemInfo::default(),
         };      
-        println!(" => Extracting {:02}/{:02}: item id {:02} main type '{}' sub type '{}' type {}", 
-            id, image_head.item_count, item_info.item_id, item_info.item_main_type, item_info.item_sub_type, item_info.file_type);
+        println!(" => Extracting {:02}/{:02}: item id {:02}, main type '{}', \
+            sub type '{}', type {}, offset in item 0x{:x}, \
+            offset in image 0x{:x}", 
+            id, image_head.item_count, item_info.item_id, 
+            item_info.item_main_type, item_info.item_sub_type, 
+            item_info.file_type, item_info.current_offset_in_item,
+            item_info.offset_in_image
+        );
+        let item_path = outdir.as_ref().join(
+            format!("{}.{}", item_info.item_sub_type, item_info.item_main_type));
+        let start  = item_info.offset_in_image as usize;
+        let end = start + item_info.item_size as usize;
+        let item = &data[start..end];
+        let mut item_file = File::create(item_path)?;
+        item_file.write_all(item)?;
         offset += item_info_size;
     }
     Ok(())
