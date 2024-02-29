@@ -1,11 +1,15 @@
-use std::{ffi::{c_char, CStr, CString}, fmt::Display, fs::File, io::{Read, Write}, path::Path};
+use std::{ffi::{c_char, CStr, CString}, fmt::Display, fs::{create_dir_all, remove_dir_all, remove_file, File}, io::{Read, Write}, path::Path};
 
 use clap::Parser;
+
+use hex::FromHex;
+use sha1::Digest;
 
 #[derive(Debug)]
 enum Error {
     IOError (std::io::Error),
     NulError (std::ffi::NulError),
+    FromHexError (hex::FromHexError),
 }
 
 // macro_rules! from_error{
@@ -29,6 +33,12 @@ impl From<std::io::Error> for Error {
 impl From<std::ffi::NulError> for Error {
     fn from(value: std::ffi::NulError) -> Self {
         Self::NulError(value)
+    }
+}
+
+impl From<hex::FromHexError> for Error {
+    fn from(value: hex::FromHexError) -> Self {
+        Self::FromHexError(value)
     }
 }
 
@@ -283,37 +293,83 @@ where
         image_head.magic, image_head.image_size, image_head.item_align_size,
         image_head.item_count
     );
-    // assert!(image_head.magic == 0x27B51956);
-    // println!(" => Header: image size {}, item alignment {}, items count {}", 
-    //     image_head.image_size,image_head.item_align_size,image_head.item_count);
+    let parent = outdir.as_ref();
+    if parent.exists() {
+        println!(" => Removing existing '{}'", parent.display());
+        if parent.is_dir() {
+            remove_dir_all(parent)?
+        } else {
+            remove_file(parent)?
+        }
+    }
+    println!(" => Creating parent '{}'", parent.display());
+    create_dir_all(parent)?;
     let mut offset = std::mem::size_of::<AmlCImageHead>();
     let item_info_size = match image_head.version_head.version {
         ImageVersion::V1 => std::mem::size_of::<AmlCItemInfoV1>(),
         ImageVersion::V2 => std::mem::size_of::<AmlCItemInfoV2>(),
         ImageVersion::V3 => 0,
     };
+    let mut need_verify = None;
     for id in 1..image_head.item_count+1 {
         let item_info_ptr = unsafe {data.as_ptr().byte_add(offset)};
         let item_info: ItemInfo = match image_head.version_head.version {
             ImageVersion::V1 => (item_info_ptr as *const AmlCItemInfoV1).into(),
             ImageVersion::V2 => (item_info_ptr as *const AmlCItemInfoV2).into(),
             ImageVersion::V3 => ItemInfo::default(),
-        };      
-        println!(" => Extracting {:02}/{:02}: item id {:02}, main type '{}', \
+        };
+        println!(" => Item {:02}/{:02}: item id {:02}, main type '{}', \
             sub type '{}', type {}, offset in item 0x{:x}, \
-            offset in image 0x{:x}", 
+            offset in image 0x{:x}, verify {}, backup {} (id {})", 
             id, image_head.item_count, item_info.item_id, 
             item_info.item_main_type, item_info.item_sub_type, 
             item_info.file_type, item_info.current_offset_in_item,
-            item_info.offset_in_image
+            item_info.offset_in_image, item_info.verify,
+            item_info.is_backup_item, item_info.backup_item_id
         );
-        let item_path = outdir.as_ref().join(
-            format!("{}.{}", item_info.item_sub_type, item_info.item_main_type));
         let start  = item_info.offset_in_image as usize;
         let end = start + item_info.item_size as usize;
         let item = &data[start..end];
-        let mut item_file = File::create(item_path)?;
-        item_file.write_all(item)?;
+        match item_info.verify {
+            0 => if let Some((name, last_item)) = need_verify {
+                if item_info.item_main_type != "VERIFY" {
+                    println!("  -> Last item expects a 'VERIFY' item");
+                    panic!("Unmatched verify");
+                }
+                if item_info.item_size != 48 ||
+                    ! item.starts_with(b"sha1sum ") ||
+                    item_info.item_sub_type != name
+                {
+                    println!("  -> Item is not a valid 'VERIFY' item");
+                    panic!("Invalid verify");
+                }
+                println!("  -> Verifying last item...");
+                let sha1sum_expected = <[u8; 20]>::from_hex(&item[8..48])?;
+                let sha1sum_actual: [u8; 20] = sha1::Sha1::digest(last_item).into();
+                if sha1sum_expected == sha1sum_actual {
+                    println!("  -> Last item was OK");
+                } else {
+                    println!("  -> Last item was corrupted! Expected {:?}, found {:?}", sha1sum_expected, sha1sum_actual);
+
+                }
+                need_verify = None;
+            } else {
+                let item_path = parent.join(
+                    format!("{}.{}", item_info.item_sub_type, item_info.item_main_type));
+                let mut item_file = File::create(item_path)?;
+                item_file.write_all(item)?;
+            },
+            1 => if let Some(name) = need_verify {
+                println!("  -> Another 'need verify' item encoutered before \
+                    the VERIFY item needed by last item was found");
+                panic!("Unmatched verify")
+            } else {
+                println!("  -> This item expects the next item to be 'VERIFY'");
+                need_verify = Some(
+                    (item_info.item_sub_type.clone(), item));
+            },
+            _ => panic!("Invalid value for verify"),
+        }
         offset += item_info_size;
     }
     Ok(())
