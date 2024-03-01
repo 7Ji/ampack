@@ -1,19 +1,18 @@
-use std::{default, ffi::CStr, fmt::Display, fs::{create_dir_all, remove_dir_all, remove_file, File}, io::{Read, Seek}, path::Path};
+use std::{ffi::CStr, fmt::Display, fs::File, io::{Read, Seek}, path::Path};
 
-use crate::{impl_struct_from_ptr, impl_struct_try_from_ptr, sha1sum::Sha1sum, Error, Result};
+use crate::{sha1sum::Sha1sum, Error, Result};
 
 /* These values are always the same for any images */
+
 const MAGIC: u32 = 0x27b51956;
 const FILE_TYPE: u32 = 0;
 const CURRENT_OFFSET_IN_ITEM: u64 = 0;
 
-
-type RawVersion = u32;
-
 #[derive(Debug)]
 pub(crate) enum ImageError {
+    InvalidMagic(u32),
     IllegalVerify,
-    InvalidVersion (RawVersion),
+    InvalidVersion (u32),
     UnmatchedVerify
 }
 
@@ -28,7 +27,7 @@ pub(crate) enum ImageVersion {
     V1,
     #[default]
     V2,
-    V3,
+    // V3,
 }
 
 type RawImageVersion = u32;
@@ -40,7 +39,7 @@ impl TryFrom<RawImageVersion> for ImageVersion {
         match value {
             1 => Ok(Self::V1),
             2 => Ok(Self::V2),
-            3 => Ok(Self::V3),
+            // 3 => Ok(Self::V3),
             _ => Err(ImageError::InvalidVersion(value).into()),
         }
     }
@@ -52,7 +51,7 @@ impl Display for ImageVersion {
             match self {
                 ImageVersion::V1 => "v1",
                 ImageVersion::V2 => "v2",
-                ImageVersion::V3 => "v3",
+                // ImageVersion::V3 => "v3",
             }
         )
     }
@@ -63,7 +62,7 @@ impl ImageVersion {
         match self {
             ImageVersion::V1 => SIZE_RAW_ITEM_INFO_V1,
             ImageVersion::V2 => SIZE_RAW_ITEM_INFO_V2,
-            ImageVersion::V3 => SIZE_RAW_ITEM_INFO_V3,
+            // ImageVersion::V3 => SIZE_RAW_ITEM_INFO_V3,
         }
     }
 }
@@ -90,26 +89,26 @@ const SIZE_RAW_IMAGE_HEAD: usize = std::mem::size_of::<RawImageHead>();
 
 #[repr(packed)]
 struct RawItemInfo<const LEN: usize> {
-    item_id: u32,
-    file_type: u32,
-    current_offset_in_item: u64,
+    _item_id: u32,
+    _file_type: u32,
+    _current_offset_in_item: u64,
     offset_in_image: u64,
     item_size: u64,
     item_main_type: [u8; LEN],
     item_sub_type: [u8; LEN],
     verify: u32,
-    is_backup_item: u16,
-    backup_item_id: u16,
+    _is_backup_item: u16,
+    _backup_item_id: u16,
     _reserve: [u8; 24],
 }
 
 type RawItemInfoV1 = RawItemInfo<32>;
 type RawItemInfoV2 = RawItemInfo<256>;
-type RawItemInfoV3 = RawItemInfo<256>;
+// type RawItemInfoV3 = RawItemInfo<256>;
 
 const SIZE_RAW_ITEM_INFO_V1: usize = std::mem::size_of::<RawItemInfoV1>();
 const SIZE_RAW_ITEM_INFO_V2: usize = std::mem::size_of::<RawItemInfoV2>();
-const SIZE_RAW_ITEM_INFO_V3: usize = std::mem::size_of::<RawItemInfoV3>();
+// const SIZE_RAW_ITEM_INFO_V3: usize = std::mem::size_of::<RawItemInfoV3>();
 
 fn cstr_from_slice_u8_c_string(slice: &[u8]) -> &CStr {
     unsafe {CStr::from_ptr(slice.as_ptr() as *const i8)}
@@ -118,48 +117,6 @@ fn cstr_from_slice_u8_c_string(slice: &[u8]) -> &CStr {
 fn string_from_slice_u8_c_string(slice: &[u8]) -> String {
     cstr_from_slice_u8_c_string(slice).to_string_lossy().into()
 }
-
-// impl From<&AmlCItemInfo> for ItemInfo {
-//     fn from(value: &AmlCItemInfoV1) -> Self {
-//         ItemInfo {
-//             item_id: value.item_id,
-//             file_type: value.file_type,
-//             current_offset_in_item: value.current_offset_in_item,
-//             offset_in_image: value.offset_in_image,
-//             item_size: value.item_size,
-//             item_main_type: string_from_slice_u8_c_string(
-//                 &value.item_main_type),
-//             item_sub_type: string_from_slice_u8_c_string(
-//                 &value.item_sub_type),
-//             verify: value.verify,
-//             is_backup_item: value.is_backup_item,
-//             backup_item_id: value.backup_item_id,
-//         }
-//     }
-// }
-
-// impl_struct_from_ptr!(ItemInfo, AmlCItemInfoV1);
-
-// impl From<&AmlCItemInfoV2> for ItemInfo {
-//     fn from(value: &AmlCItemInfoV2) -> Self {
-//         ItemInfo {
-//             item_id: value.item_id,
-//             file_type: value.file_type,
-//             current_offset_in_item: value.current_offset_in_item,
-//             offset_in_image: value.offset_in_image,
-//             item_size: value.item_size,
-//             item_main_type: string_from_slice_u8_c_string(
-//                 &value.item_main_type),
-//             item_sub_type: string_from_slice_u8_c_string(
-//                 &value.item_sub_type),
-//             verify: value.verify,
-//             is_backup_item: value.is_backup_item,
-//             backup_item_id: value.backup_item_id,
-//         }
-//     }
-// }
-
-// impl_struct_from_ptr!(ItemInfo, AmlCItemInfoV2);
 
 #[derive(Default)]
 struct Item {
@@ -209,6 +166,11 @@ impl TryFrom<&Path> for Image {
         file.read_exact(&mut buffer[0..SIZE_RAW_IMAGE_HEAD])?;
         let header = unsafe {
             (buffer.as_ptr() as *const RawImageHead).read()};
+        if header.magic != MAGIC {
+            eprintln!("Image magic invalid: expected 0x{}, found 0x{}", 
+                MAGIC, {header.magic});
+            return Err(ImageError::InvalidMagic(header.magic).into())
+        }
         let version = 
             ImageVersion::try_from(header.version_head.version)?;
         let size_info = version.size_raw_info();
@@ -220,8 +182,9 @@ impl TryFrom<&Path> for Image {
                 SIZE_RAW_IMAGE_HEAD as u64 + 
                     size_info as u64 * item_id as u64))?;
             file.read_exact(buffer_info)?;
-            let (offset, size, verify, main_type, sub_type) = 
-                match version 
+            let (offset, size, verify, 
+                main_type, sub_type
+            ) = match version 
             {
                 ImageVersion::V1 => {
                     let info = unsafe {
@@ -249,7 +212,6 @@ impl TryFrom<&Path> for Image {
                             &info.item_sub_type)
                     )
                 },
-                ImageVersion::V3 => todo!(),
             };
             file.seek(std::io::SeekFrom::Start(offset))?;
             let mut data = vec![0; size as usize];
@@ -301,6 +263,15 @@ impl Image {
     pub(crate) fn try_read<P: AsRef<Path>>(file: P) -> Result<Self> {
         file.as_ref().try_into()
     }
+
+    // pub(crate) fn verify(&self) {
+    //     for item in self.items.iter() {
+    //         if let Some(sha1sum) = item.sha1sum {
+                
+
+    //         }
+    //     }
+    // }
 
     // pub(crate) fn try_write<P: AsRef<Path>>(&self, dir: P) -> Result<()> {
     //     let parent = dir.as_ref();
