@@ -5,7 +5,18 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[dependencies.clap]
+version = "4.5"
+features = ["derive"]
+
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+
 [dependencies]
-clap = { version = "4.5.1", features = ["derive"] }
-hex = "0.4.3"
-sha1 = "0.10.6"
+cli-table = "0.4"
+hex = "0.4"
+indicatif = "0.17"
+rayon = "1.10"
+serde_yaml = "0.9"
+sha1 = "0.10"
