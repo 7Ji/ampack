@@ -23,8 +23,8 @@ enum Action {
         /// Path of dir to output, would be deleted if exists, and then created
         outdir: String,
         #[arg(short = 's', long)]
-        /// Skip verifying items
-        skip_verify: bool,
+        /// Do not verify items
+        no_verify: bool,
     },
     /// Pack partition files into an image
     Pack {
@@ -47,23 +47,24 @@ struct Arg {
     imgver: Option<image::ImageVersion>,
 }
 
-fn unpack<P1, P2>(image: P1, outdir: P2, skip_verify: bool) -> Result<()>
+fn unpack<P1, P2>(image: P1, outdir: P2, no_verify: bool) -> Result<()>
 where
     P1: AsRef<Path>,
     P2: AsRef<Path>
 {
     let image = image::Image::try_read(image)?;
-    if ! skip_verify {
-        image.verify()?;
+    if ! no_verify {
+        image.verify()?
     }
-    println!("=> Read image: {}", &image);
+    image.print_table_stdout();
+    image.try_write(&outdir)?;
     Ok(())
 }
 
 fn main() -> Result<()> {
     let arg = Arg::parse();
     match arg.action {
-        Action::Unpack { image, outdir , skip_verify} => unpack(image, outdir, skip_verify),
+        Action::Unpack { image, outdir , no_verify} => unpack(image, outdir, no_verify),
         Action::Pack { image, indir } => todo!(),
     }
 }

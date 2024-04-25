@@ -1,6 +1,7 @@
-use std::{ffi::CStr, fmt::Display, fs::File, io::{Read, Seek}, path::Path, time::Duration};
+use std::{ffi::CStr, fmt::Display, fs::{create_dir_all, remove_dir_all, remove_file, File}, io::{Read, Seek, Write}, path::Path, time::Duration};
 
-use indicatif::{ProgressBar, ProgressStyle};
+use cli_table::{Cell, Style, Table, Row, format::Justify};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::{Serialize, Deserialize};
 
 use crate::{sha1sum::Sha1sum, Error, Result};
@@ -206,6 +207,17 @@ impl Display for Image {
     }
 }
 
+macro_rules! cell_right {
+    ($raw: expr) => {
+        $raw.cell().justify(Justify::Right)
+    };
+}
+macro_rules! cell_bold_center {
+    ($raw: expr) => {
+        $raw.cell().bold(true).justify(Justify::Center)
+    };
+}
+
 impl TryFrom<&Path> for Image {
     type Error = Error;
 
@@ -226,17 +238,6 @@ impl TryFrom<&Path> for Image {
         let buffer_info = &mut buffer[0..size_info];
         let mut items = Vec::new();
         let mut need_verify: Option<Item> = None;
-        macro_rules! cell_right {
-            ($raw: expr) => {
-                $raw.cell().justify(Justify::Right)
-            };
-        }
-        macro_rules! cell_bold_center {
-            ($raw: expr) => {
-                $raw.cell().bold(true).justify(Justify::Center)
-            };
-        }
-        use cli_table::{Cell, Style, Table, Row, format::Justify};
         let mut rows = Vec::new();
         // println!("Reading image...");
         let progress_bar = ProgressBar::new(header.item_count.into());
@@ -393,27 +394,29 @@ impl Image {
     pub(crate) fn verify(&self) -> Result<()> {
         let need_verifies: Vec<&Item> = self.items.iter().filter(
             |item|item.sha1sum.is_some()).collect();
-        let progress_bar = ProgressBar::new(need_verifies.len() as u64);
-        progress_bar.set_style(ProgressStyle::with_template(
-            "Verifying items => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}").unwrap());
-        progress_bar.enable_steady_tick(Duration::from_secs(1));
-        use rayon::prelude::*;
-        let result = need_verifies.par_iter().map(|item| {
+        let multiprogress = MultiProgress::new();
+        let mut mapped: Vec<(&Item, String, ProgressBar)> = need_verifies.iter().map(
+        |item|
+        {
             let name = format!("{}.{}", item.stem, item.extension);
-            progress_bar.set_message(name.clone());
-            // sha1
+            let progress_bar = multiprogress.add(ProgressBar::new(item.data.len() as u64 / 0x100000));
+            progress_bar.set_style(ProgressStyle::with_template(&format!("Verifying item => {} {}", "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>5}/{len:>5} MiB", name)).unwrap());
+            progress_bar.set_message("Waiting for start...");
+            (*item, name, progress_bar)
+        }).collect();
+        use rayon::prelude::*;
+        let result = mapped.par_iter_mut().map(|(item, name, ref mut progress_bar)| {
             let sha1sum_record = item.sha1sum.as_ref().expect("Sha1sum not recorded");
-            let sha1sum_calculated = Sha1sum::from_data(&item.data);
+            let sha1sum_calculated = Sha1sum::from_data_with_bar(&item.data, progress_bar);
             if sha1sum_record != &sha1sum_calculated {
                 eprintln!("Recorded SHA1sum ({}) different from calculated \
                     SHA1sum ({}) for item '{}'", sha1sum_record, 
                     sha1sum_calculated, name);
                 return Err(Error::ImageError(ImageError::IllegalVerify));
             }
-            progress_bar.inc(1);
             Ok(())
         }).find_first(|r|r.is_err());
-        progress_bar.finish_and_clear();
+        multiprogress.clear().unwrap();
         if let Some(r) = result {
             if let Err(e) = r {
                 return Err(e)
@@ -428,96 +431,55 @@ impl Image {
         file.as_ref().try_into()
     }
 
-    // pub(crate) fn verify(&self) {
-    //     for item in self.items.iter() {
-    //         if let Some(sha1sum) = item.sha1sum {
-                
+    pub(crate) fn print_table_stdout(&self) -> () {
+        println!("Items in image:");
+        let mut rows = Vec::new();
+        for (id, item) in self.items.iter().enumerate() {
+            rows.push([
+                cell_right!(id),
+                cell_right!(&item.stem),
+                cell_right!(&item.extension),
+                cell_right!(format!("0x{:x}", item.data.len())),
+                if let Some(sha1sum) = &item.sha1sum {
+                    cell_right!(format!("{}", sha1sum))
+                } else {
+                    cell_right!("None")
+                }
+            ])
+        }
+        let table = rows.table().title([
+            cell_bold_center!("ID"),
+            cell_bold_center!("stem"),
+            cell_bold_center!("extension"),
+            cell_bold_center!("size"),
+            cell_bold_center!("sha1sum")
+        ]).bold(true);
+        cli_table::print_stdout(table).unwrap();
+    }
 
-    //         }
-    //     }
-    // }
-
-    // pub(crate) fn try_write<P: AsRef<Path>>(&self, dir: P) -> Result<()> {
-    //     let parent = dir.as_ref();
-    //     if parent.exists() {
-    //         println!(" => Removing existing '{}'", parent.display());
-    //         if parent.is_dir() {
-    //             remove_dir_all(parent)?
-    //         } else {
-    //             remove_file(parent)?
-    //         }
-    //     }
-    //     println!(" => Creating parent '{}'", parent.display());
-    //     create_dir_all(parent)?;
-    //     let mut offset = std::mem::size_of::<AmlCImageHead>();
-    //     let item_info_size = match image_head.version_head.version {
-    //         ImageVersion::V1 => std::mem::size_of::<AmlCItemInfoV1>(),
-    //         ImageVersion::V2 => std::mem::size_of::<AmlCItemInfoV2>(),
-    //         ImageVersion::V3 => 0,
-    //     };
-    //     let mut need_verify = None;
-    //     for id in 1..image_head.item_count+1 {
-    //         let item_info_ptr = unsafe {data.as_ptr().byte_add(offset)};
-    //         let item_info: ItemInfo = match image_head.version_head.version {
-    //             ImageVersion::V1 => (item_info_ptr as *const AmlCItemInfoV1).into(),
-    //             ImageVersion::V2 => (item_info_ptr as *const AmlCItemInfoV2).into(),
-    //             ImageVersion::V3 => ItemInfo::default(),
-    //         };
-    //         println!(" => Item {:02}/{:02}: item id {:02}, main type '{}', \
-    //             sub type '{}', type {}, offset in item 0x{:x}, \
-    //             offset in image 0x{:x}, verify {}, backup {} (id {})", 
-    //             id, image_head.item_count, item_info.item_id, 
-    //             item_info.item_main_type, item_info.item_sub_type, 
-    //             item_info.file_type, item_info.current_offset_in_item,
-    //             item_info.offset_in_image, item_info.verify,
-    //             item_info.is_backup_item, item_info.backup_item_id
-    //         );
-    //         let start  = item_info.offset_in_image as usize;
-    //         let end = start + item_info.item_size as usize;
-    //         let item = &data[start..end];
-    //         match item_info.verify {
-    //             0 => if let Some((name, last_item)) = need_verify {
-    //                 if item_info.item_main_type != "VERIFY" {
-    //                     println!("  -> Last item expects a 'VERIFY' item");
-    //                     panic!("Unmatched verify");
-    //                 }
-    //                 if item_info.item_size != 48 ||
-    //                     ! item.starts_with(b"sha1sum ") ||
-    //                     item_info.item_sub_type != name
-    //                 {
-    //                     println!("  -> Item is not a valid 'VERIFY' item");
-    //                     panic!("Invalid verify");
-    //                 }
-    //                 println!("  -> Verifying last item...");
-    //                 let sha1sum_expected = <[u8; 20]>::from_hex(&item[8..48])?;
-    //                 let sha1sum_actual: [u8; 20] = sha1::Sha1::digest(last_item).into();
-    //                 if sha1sum_expected == sha1sum_actual {
-    //                     println!("  -> Last item was OK");
-    //                 } else {
-    //                     println!("  -> Last item was corrupted! Expected {:?}, found {:?}", sha1sum_expected, sha1sum_actual);
-
-    //                 }
-    //                 need_verify = None;
-    //             } else {
-    //                 let item_path = parent.join(
-    //                     format!("{}.{}", item_info.item_sub_type, item_info.item_main_type));
-    //                 let mut item_file = File::create(item_path)?;
-    //                 item_file.write_all(item)?;
-    //             },
-    //             1 => if let Some(name) = need_verify {
-    //                 println!("  -> Another 'need verify' item encoutered before \
-    //                     the VERIFY item needed by last item was found");
-    //                 panic!("Unmatched verify")
-    //             } else {
-    //                 println!("  -> This item expects the next item to be 'VERIFY'");
-    //                 need_verify = Some(
-    //                     (item_info.item_sub_type.clone(), item));
-    //             },
-    //             _ => panic!("Invalid value for verify"),
-    //         }
-    //         offset += item_info_size;
-    //     }
-    //     Ok(())
-        
-    // }
+    pub(crate) fn try_write<P: AsRef<Path>>(&self, dir: P) -> Result<()> {
+        let parent = dir.as_ref();
+        if parent.exists() {
+            println!("=> Removing existing '{}'", parent.display());
+            if parent.is_dir() {
+                remove_dir_all(parent)?
+            } else {
+                remove_file(parent)?
+            }
+        }
+        println!("=> Extracting image to '{}'", parent.display());
+        create_dir_all(parent)?;
+        let progress_bar = ProgressBar::new(self.items.len() as u64);
+        progress_bar.set_style(ProgressStyle::with_template(
+            "Writing items => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}").unwrap());
+        progress_bar.enable_steady_tick(Duration::from_secs(1));
+        for item in self.items.iter() {
+            let name = format!("{}.{}", item.stem, item.extension);
+            let mut file = File::create(parent.join(&name))?;
+            progress_bar.set_message(name);
+            file.write_all(&item.data)?;
+            progress_bar.inc(1);
+        }
+        Ok(())
+    }
 }

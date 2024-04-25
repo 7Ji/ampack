@@ -2,7 +2,9 @@ use std::fmt::Display;
 
 use hex::FromHex;
 
+use indicatif::ProgressBar;
 use serde::{Serialize, Deserialize};
+use sha1::{Digest, Sha1};
 
 use crate::{Error, Result};
 
@@ -25,7 +27,20 @@ impl Sha1sum {
     }
 
     pub(crate) fn from_data(data: &[u8]) -> Self {
-        Self(<sha1::Sha1 as sha1::Digest>::digest(data).into())
+        Self(Sha1::digest(data).into())
+    }
+
+    pub(crate) fn from_data_with_bar(data: &[u8], bar: &mut ProgressBar) -> Self {
+        const STEP: usize = 0x100000;
+        let len = data.len() / STEP;
+        let mut hasher = Sha1::new();
+        for (id, chunk) in data.chunks(STEP).enumerate() {
+            // bar.set_message(format!("{}/{}", id, suffix));
+            hasher.update(chunk);
+            bar.inc(1);
+        }
+        bar.finish_and_clear();
+        Self(hasher.finalize().into())
     }
 }
 
