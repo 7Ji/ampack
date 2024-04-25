@@ -9,8 +9,11 @@ use crate::{sha1sum::Sha1sum, Error, Result};
 /* These values are always the same for any images */
 
 const MAGIC: u32 = 0x27b51956;
-const FILE_TYPE: u32 = 0;
+const FILE_TYPE_GENERIC: u32 = 0;
+const FILE_TYPE_SPARSE: u32 = 254;
 const CURRENT_OFFSET_IN_ITEM: u64 = 0;
+const ANDROID_SPARSE_IMAGE_MAGIC: u64 = 0xed26ff3a;
+const ANDROID_SPARSE_IMAGE_MAGIC_BYTES: [u8; 4] = [0x3a, 0xff, 0x26, 0xed];
 
 #[derive(Debug)]
 pub(crate) enum ImageError {
@@ -427,7 +430,7 @@ impl Image {
         Ok(())
     }
 
-    pub(crate) fn try_read<P: AsRef<Path>>(file: P) -> Result<Self> {
+    pub(crate) fn try_read_file<P: AsRef<Path>>(file: P) -> Result<Self> {
         file.as_ref().try_into()
     }
 
@@ -457,7 +460,7 @@ impl Image {
         cli_table::print_stdout(table).unwrap();
     }
 
-    pub(crate) fn try_write<P: AsRef<Path>>(&self, dir: P) -> Result<()> {
+    pub(crate) fn try_write_dir<P: AsRef<Path>>(&self, dir: P) -> Result<()> {
         let parent = dir.as_ref();
         if parent.exists() {
             println!("=> Removing existing '{}'", parent.display());
@@ -482,4 +485,12 @@ impl Image {
         }
         Ok(())
     }
+
+    pub(crate) fn try_write_file<P: AsRef<Path>>(&self, file: P) -> Result<()> {
+
+        Ok(())
+    }
+    // pub(crate) fn try_repack() -> Result<()> {
+
+    // }
 }
