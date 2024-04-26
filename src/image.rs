@@ -667,9 +667,11 @@ impl ImageToWrite {
         if is_backup_item == 0 { // Not a backup item
             offset = self.data_body.len();
             self.data_body.extend_from_slice(&item.data);
-            let remaining =  align_size - self.data_body.len() % align_size;
-            for _ in remaining..4 {
-                self.data_body.push(0)
+            let remaining =  self.data_body.len() % align_size;
+            if remaining > 0 {
+                for _ in remaining..4 {
+                    self.data_body.push(0)
+                }
             }
         }
         let end = (offset as usize + item.data.len() + 3) / align_size * align_size;
@@ -720,7 +722,7 @@ impl ImageToWrite {
                 item_sub_type: item.stem.clone(),
                 verify: 0,
                 is_backup_item, 
-                backup_item_id: backup_item_id + 1
+                backup_item_id: if is_backup_item == 0 { 0 } else { backup_item_id + 1 }
             });
             self.head.item_count += 1;
         }
