@@ -17,6 +17,7 @@ features = ["derive"]
 cli-table = "0.4"
 hex = "0.4"
 indicatif = "0.17"
+md5 = "0.7"
 rayon = "1.10"
 serde_yaml = "0.9"
 sha1 = "0.10"

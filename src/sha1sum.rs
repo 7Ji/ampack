@@ -10,7 +10,7 @@ use crate::{Error, Result};
 
 type Sha1sumByteArray = [u8; 20];
 
-#[derive(Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub(crate) struct Sha1sum(Sha1sumByteArray);
 
 // impl TryFrom<&[u8]> for Sha1sum {

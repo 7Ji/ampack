@@ -1,4 +1,4 @@
-use std::{ffi::CStr, fmt::Display, fs::{create_dir_all, remove_dir_all, remove_file, File}, io::{Read, Seek, Write}, path::Path, time::Duration};
+use std::{cmp::min, ffi::{CStr, CString}, fmt::Display, fs::{create_dir_all, remove_dir_all, remove_file, File}, io::{Read, Seek, Write}, ops::{Deref, DerefMut}, path::Path, time::Duration};
 
 use cli_table::{Cell, Style, Table, Row, format::Justify};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -33,6 +33,10 @@ pub(crate) enum ImageError {
         stem: String,
         extension: String,
     },
+    SizeMismatch {
+        exptected: usize,
+        actual: usize
+    }
 }
 
 impl Into<Error> for ImageError {
@@ -65,6 +69,15 @@ impl TryFrom<RawImageVersion> for ImageVersion {
     }
 }
 
+impl Into<RawImageVersion> for &ImageVersion {
+    fn into(self) -> RawImageVersion {
+        match self {
+            ImageVersion::V1 => 1,
+            ImageVersion::V2 => 2,
+        }
+    }
+}
+
 impl Display for ImageVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}",
@@ -85,19 +98,19 @@ impl ImageVersion {
             // ImageVersion::V3 => SIZE_RAW_ITEM_INFO_V3,
         }
     }
-}
 
-#[repr(packed)]
-struct RawVersionHead {
-    crc: u32,
-    version: u32,
+    fn size_item_type(&self) -> usize {
+        match self {
+            ImageVersion::V1 => SIZE_ITEM_TYPE_V1,
+            ImageVersion::V2 => SIZE_ITEM_TYPE_V2,
+        }
+    }
 }
-
-const SIZE_RAW_VERSION: usize = std::mem::size_of::<RawVersionHead>();
 
 #[repr(packed)]
 struct RawImageHead {
-    version_head: RawVersionHead,
+    crc: u32,
+    version: u32,
     magic: u32,
     image_size: u64,
     item_align_size: u32,
@@ -105,7 +118,30 @@ struct RawImageHead {
     _reserve: [u8; 36],
 }
 
+impl RawImageHead {
+    fn new(version: &ImageVersion) -> Self {
+        Self {
+            crc: 0,
+            version: version.into(),
+            magic: MAGIC,
+            image_size: 0,
+            item_align_size: 4,
+            item_count: 0,
+            _reserve: [0; 36],
+        }
+    }
+}
+
+impl From<&ImageVersion> for RawImageHead {
+    fn from(value: &ImageVersion) -> Self {
+        Self::new(value)
+    }
+}
+
 const SIZE_RAW_IMAGE_HEAD: usize = std::mem::size_of::<RawImageHead>();
+const SIZE_ITEM_TYPE_V1: usize = 32;
+const SIZE_ITEM_TYPE_V2: usize = 256;
+
 
 #[repr(packed)]
 struct RawItemInfoVariableLength<const LEN: usize> {
@@ -122,8 +158,8 @@ struct RawItemInfoVariableLength<const LEN: usize> {
     reserve: [u8; 24],
 }
 
-type RawItemInfoV1 = RawItemInfoVariableLength<32>;
-type RawItemInfoV2 = RawItemInfoVariableLength<256>;
+type RawItemInfoV1 = RawItemInfoVariableLength<SIZE_ITEM_TYPE_V1>;
+type RawItemInfoV2 = RawItemInfoVariableLength<SIZE_ITEM_TYPE_V2>;
 // type RawItemInfoV3 = RawItemInfo<256>;
 
 const SIZE_RAW_ITEM_INFO_V1: usize = std::mem::size_of::<RawItemInfoV1>();
@@ -166,6 +202,35 @@ impl<const LEN: usize> From<RawItemInfoVariableLength<LEN>> for RawItemInfo {
             verify: value.verify,
             is_backup_item: value.is_backup_item,
             backup_item_id: value.backup_item_id,
+        }
+    }
+}
+
+fn bytes_fill_from_str(dest: &mut [u8], src: &str) {
+    let src = src.as_bytes();
+    let len = min(dest.len() - 1, src.len());
+    dest[0..len].copy_from_slice(&src[0..len])
+}
+
+
+impl<const LEN: usize> Into<RawItemInfoVariableLength<LEN>> for &RawItemInfo {
+    fn into(self) -> RawItemInfoVariableLength<LEN> {
+        let mut item_main_type = [0; LEN];
+        bytes_fill_from_str(&mut item_main_type, &self.item_main_type);
+        let mut item_sub_type = [0; LEN];
+        bytes_fill_from_str(&mut item_sub_type, &self.item_sub_type);
+        RawItemInfoVariableLength { 
+            item_id: self.item_id,
+            file_type: self.file_type,
+            current_offset_in_item: self.current_offset_in_item,
+            offset_in_image: self.offset_in_image,
+            item_size: self.item_size,
+            item_main_type,
+            item_sub_type,
+            verify: self.verify,
+            is_backup_item: self.is_backup_item,
+            backup_item_id: self.backup_item_id, 
+            reserve: [0; 24]
         }
     }
 }
@@ -236,7 +301,7 @@ impl TryFrom<&Path> for Image {
             return Err(ImageError::InvalidMagic{magic: header.magic}.into())
         }
         let version = 
-            ImageVersion::try_from(header.version_head.version)?;
+            ImageVersion::try_from(header.version)?;
         let size_info = version.size_raw_info();
         let buffer_info = &mut buffer[0..size_info];
         let mut items = Vec::new();
@@ -264,27 +329,31 @@ impl TryFrom<&Path> for Image {
             let mut data = vec![0; item_info.item_size as usize];
             file.read_exact(&mut data)?;
             if let Some(mut item_need_verify) = need_verify {
-                if item_info.item_main_type == "VERIFY" {
-                    let sha1sum = 
-                        if item_info.item_size == 48 && 
-                            data.starts_with(b"sha1sum ") && 
-                            item_info.verify == 0 
-                        {
-                            Sha1sum::from_hex(&data[8..48])?
-                        } else {
-                            eprintln!("Verify item content is not sha1sum");
-                            return Err(ImageError::IllegalVerify.into())
-                        };
-                    item_need_verify.sha1sum = Some(sha1sum);
-                    items.push(item_need_verify);
-                    need_verify = None;
-                } else {
+                if item_info.item_sub_type != item_need_verify.stem {
+                    eprintln!("Partition {} does not have its verify right \
+                        after it, but {}.{}", item_need_verify.stem,
+                        item_info.item_sub_type, item_info.item_main_type);
+                    return Err(ImageError::UnmatchedVerify.into())
+                }
+                if item_info.item_main_type != "VERIFY" {
                     eprintln!("Item after {}.{} that needs verify is not a \
                         verify item but a non-verify item {}.{}",
                         item_need_verify.stem, item_need_verify.extension,
                         item_info.item_sub_type, item_info.item_main_type);
                     return Err(ImageError::UnmatchedVerify.into())
                 }
+                if ! (item_info.item_size == 48 && 
+                        data.starts_with(b"sha1sum ") && 
+                        item_info.verify == 0) 
+                {
+                    eprintln!("Verify item content for {} is not sha1sum",
+                        item_need_verify.stem);
+                    return Err(ImageError::IllegalVerify.into())
+                }
+                let sha1sum = Sha1sum::from_hex(&data[8..48])?;
+                item_need_verify.sha1sum = Some(sha1sum);
+                items.push(item_need_verify);
+                need_verify = None;
             } else {
                 let item = Item {
                     data,
@@ -292,10 +361,19 @@ impl TryFrom<&Path> for Image {
                     stem: item_info.item_sub_type.clone(),
                     sha1sum: None,
                 };
-                if item_info.verify == 0 {
-                    items.push(item)
-                } else {
+                if item.extension == "PARTITION" {
+                    if item_info.verify == 0 {
+                        eprintln!("Partition {} does not have verify",
+                            item.stem);
+                        return Err(ImageError::UnmatchedVerify.into())
+                    }
                     need_verify = Some(item)
+                } else {
+                    if item_info.verify != 0 {
+                        eprintln!("Item {}.{} has verify", item.stem, item.extension);
+                        return Err(ImageError::IllegalVerify.into())
+                    }
+                    items.push(item)
                 }
             }
             rows.push([
@@ -341,6 +419,28 @@ impl TryFrom<&Path> for Image {
     }
 }
 
+struct Essentials<'a> {
+    ddr_usb: &'a Item,
+    uboot_usb: &'a Item,
+    aml_sdc_burn_init: &'a Item,
+    meson1_dtb: &'a Item,
+    platform_conf: &'a Item
+}
+
+impl<'a> TryFrom<&'a Image> for Essentials<'a> {
+    type Error = Error;
+
+    fn try_from(image: &'a Image) -> Result<Self> {
+        Ok(Self {
+            ddr_usb: image.find_item("DDR", "USB")?,
+            uboot_usb: image.find_item("UBOOT", "USB")?,
+            aml_sdc_burn_init: image.find_item("aml_sdc_burn", "ini")?,
+            meson1_dtb: image.find_item("meson1", "dtb")?,
+            platform_conf: image.find_item("platform", "conf")?,
+        })
+    }
+}
+
 impl Image {
     fn find_item(&self, stem: &str, extension: &str) -> Result<&Item> {
         let mut result = None;
@@ -378,23 +478,13 @@ impl Image {
         }
     }
 
-    fn find_ddr_usb(&self) -> Result<&Item> {
-        self.find_item("DDR", "USB")
-    }
-
-    fn find_uboot_usb(&self) -> Result<&Item> {
-        self.find_item("UBOOT", "USB")
-    }
-
-    fn find_aml_sdc_burn_ini(&self) -> Result<&Item> {
-        self.find_item("aml_sdc_burn", "ini")
-    }
-
-    fn find_platform_conf(&self) -> Result<&Item> {
-        self.find_item("platform", "conf")
+    fn partitions(&self) -> Vec<&Item> {
+        self.items.iter().filter(
+            |item|item.extension == "PARTITION").collect()
     }
 
     pub(crate) fn verify(&self) -> Result<()> {
+        let essentials = Essentials::try_from(self)?;
         let need_verifies: Vec<&Item> = self.items.iter().filter(
             |item|item.sha1sum.is_some()).collect();
         let multiprogress = MultiProgress::new();
@@ -426,6 +516,36 @@ impl Image {
             } else {
                 eprintln!("Unexpected: Filtered error still results in OK");
             }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn clear_verify(&mut self) {
+        for item in self.items.iter_mut() {
+            item.sha1sum = None
+        }
+    }
+
+    pub(crate) fn fill_verify(&mut self) -> Result<()> {
+        let mut need_verifies: Vec<&mut Item> = self.items.iter_mut().filter(
+            |item|item.sha1sum.is_none()).collect();
+        let multiprogress = MultiProgress::new();
+        let mut mapped: Vec<(&Item, ProgressBar)> = need_verifies.iter().map(
+        |item|
+        {
+            let name = format!("{}.{}", item.stem, item.extension);
+            let progress_bar = multiprogress.add(ProgressBar::new(item.data.len() as u64 / 0x100000));
+            progress_bar.set_style(ProgressStyle::with_template(&format!("Generating verify => {} {}", "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>5}/{len:>5} MiB", name)).unwrap());
+            progress_bar.set_message("Waiting for start...");
+            (item as &Item, progress_bar)
+        }).collect();
+        use rayon::prelude::*;
+        let sha1sums: Vec<Sha1sum> = mapped.par_iter_mut().map(|(item, ref mut progress_bar)| {
+            Sha1sum::from_data_with_bar(&item.data, progress_bar)
+        }).collect();
+        multiprogress.clear().unwrap();
+        for (item, sha1sum) in need_verifies.iter_mut().zip(sha1sums.into_iter()) {
+            item.sha1sum = Some(sha1sum)
         }
         Ok(())
     }
@@ -463,14 +583,12 @@ impl Image {
     pub(crate) fn try_write_dir<P: AsRef<Path>>(&self, dir: P) -> Result<()> {
         let parent = dir.as_ref();
         if parent.exists() {
-            println!("=> Removing existing '{}'", parent.display());
             if parent.is_dir() {
                 remove_dir_all(parent)?
             } else {
                 remove_file(parent)?
             }
         }
-        println!("=> Extracting image to '{}'", parent.display());
         create_dir_all(parent)?;
         let progress_bar = ProgressBar::new(self.items.len() as u64);
         progress_bar.set_style(ProgressStyle::with_template(
@@ -487,10 +605,263 @@ impl Image {
     }
 
     pub(crate) fn try_write_file<P: AsRef<Path>>(&self, file: P) -> Result<()> {
-
+        let image_to_write = ImageToWrite::try_from(self)?;
+        let mut out_file = File::create(file.as_ref())?;
+        let progress_bar = ProgressBar::new(
+            (image_to_write.data_head_infos.len() + 
+                    image_to_write.data_body.len()) as u64);
+        progress_bar.set_style(ProgressStyle::with_template(
+            "Writing image => \
+                [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7}"
+            ).unwrap());
+        // progress_bar.enable_steady_tick(Duration::from_secs(1));
+        for chunk in 
+            image_to_write.data_head_infos.chunks(0x100000).chain(
+                image_to_write.data_body.chunks(0x100000)) 
+        {
+            out_file.write_all(chunk)?;
+            progress_bar.inc(chunk.len() as u64)
+        }
+        progress_bar.finish_and_clear();
         Ok(())
     }
-    // pub(crate) fn try_repack() -> Result<()> {
+}
 
-    // }
+
+
+struct ImageToWrite {
+    head: RawImageHead,
+    infos: Vec<RawItemInfo>,
+    sha1sums: Vec<Sha1sum>,
+    data_head_infos: Vec<u8>,
+    data_body: Vec<u8>,
+}
+
+impl ImageToWrite {
+    fn find_backup(&self, sha1sum: &Sha1sum) -> (u16, u16, u64) {
+        for (id, (item_sha1sum, item_info)) in 
+            self.sha1sums.iter().zip(self.infos.iter()).enumerate() 
+        {
+            if sha1sum == item_sha1sum {
+                return (1, id as u16, item_info.offset_in_image)
+            }
+        }
+        (0, 0, 0)
+    }
+
+    fn append_item(&mut self, item: &Item) -> Result<()>{
+        // println!("Appending item to ")
+        let sha1sum = if let Some(sha1sum) = &item.sha1sum {
+            sha1sum
+        } else {
+            eprintln!("Sha1sum for item {}.{} does not exist", 
+                item.stem, item.extension);
+            return Err(ImageError::IllegalVerify.into());
+        };
+        let (is_backup_item, backup_item_id, offset) 
+            = self.find_backup(sha1sum);
+        let mut offset = offset as usize;
+        let align_size = self.head.item_align_size as usize;
+        
+        // let remaining = self.data_body.len() % self.head.item_align_size as usize
+        if is_backup_item == 0 { // Not a backup item
+            offset = self.data_body.len();
+            self.data_body.extend_from_slice(&item.data);
+            let remaining =  align_size - self.data_body.len() % align_size;
+            for _ in remaining..4 {
+                self.data_body.push(0)
+            }
+        }
+        let end = (offset as usize + item.data.len() + 3) / align_size * align_size;
+        let info = RawItemInfo {
+            item_id: self.infos.len() as u32,
+            file_type: 
+                if item.data.starts_with(
+                    &ANDROID_SPARSE_IMAGE_MAGIC_BYTES
+                ) {
+                    FILE_TYPE_SPARSE
+                } else {
+                    FILE_TYPE_GENERIC
+                },
+            current_offset_in_item: 0,
+            offset_in_image: offset as u64,
+            item_size: item.data.len() as u64,
+            item_main_type: item.extension.clone(),
+            item_sub_type: item.stem.clone(),
+            verify: if item.extension == "PARTITION" {1} else {0},
+            is_backup_item,
+            backup_item_id,
+        };
+        self.infos.push(info);
+        self.sha1sums.push(sha1sum.clone());
+        self.head.item_count += 1;
+        if item.extension == "PARTITION" {
+            offset = end;
+            if is_backup_item == 0 {
+                let content = format!("sha1sum {}", sha1sum);
+                let bytes = content.as_bytes();
+                if bytes.len() != 48 {
+                    eprintln!("sha1sum content length != 40");
+                    return Err(ImageError::SizeMismatch { 
+                        exptected: 48, actual: bytes.len() }.into());
+                }
+                self.data_body.extend_from_slice(bytes);
+                self.sha1sums.push(Sha1sum::from_data(bytes));
+            } else {
+                self.sha1sums.push(self.sha1sums[backup_item_id as usize].clone());
+            }
+            self.infos.push(RawItemInfo { 
+                item_id: self.infos.len() as u32, 
+                file_type: 0, 
+                current_offset_in_item: 0,
+                offset_in_image: offset as u64,
+                item_size: 48,
+                item_main_type: "VERIFY".into(),
+                item_sub_type: item.stem.clone(),
+                verify: 0,
+                is_backup_item, 
+                backup_item_id: backup_item_id + 1
+            });
+            self.head.item_count += 1;
+        }
+        Ok(())
+    }
+
+    fn finalize(&mut self, version: &ImageVersion) -> Result<()> {
+        let size_info = version.size_raw_info();
+        let offset = (
+            SIZE_RAW_IMAGE_HEAD + size_info * self.head.item_count as usize
+        ) as u64;
+        self.head.image_size = self.data_body.len() as u64 + offset;
+        self.head.version = version.into();
+        let pointer_head = &self.head as *const RawImageHead as *const u8;
+        let len_head = SIZE_RAW_IMAGE_HEAD;
+        use std::slice::from_raw_parts;
+        let raw_head = unsafe {from_raw_parts(pointer_head, len_head)};
+        self.data_head_infos.clear();
+        self.data_head_infos.extend_from_slice(raw_head);
+
+        for info in self.infos.iter_mut() {
+            info.offset_in_image += offset;
+        }
+        match version {
+            ImageVersion::V1 => 
+                for info in self.infos.iter() {
+                    let raw_item_info: RawItemInfoV1 = info.into();
+                    let pointer_info = 
+                        &raw_item_info as *const RawItemInfoV1 as *const u8;
+                    let raw_info = unsafe {
+                        from_raw_parts(
+                            pointer_info, SIZE_RAW_ITEM_INFO_V1)};
+                    self.data_head_infos.extend_from_slice(raw_info)
+                },
+            ImageVersion::V2 => 
+                for info in self.infos.iter() {
+                    let raw_item_info: RawItemInfoV2 = info.into();
+                    let pointer_info = 
+                        &raw_item_info as *const RawItemInfoV2 as *const u8;
+                    let raw_info = unsafe {
+                        from_raw_parts(
+                            pointer_info, SIZE_RAW_ITEM_INFO_V2)};
+                    self.data_head_infos.extend_from_slice(raw_info)
+                }
+        }
+        let offset_actual = self.data_head_infos.len();
+        if offset != offset_actual as u64 {
+            eprintln!("Actual head + infos size ({}) != expected ({})",
+                offset_actual, offset);
+            return Err(ImageError::SizeMismatch { 
+                exptected: offset as usize, actual: offset_actual as usize 
+            }.into());
+        }
+        Ok(())
+    }
+}
+
+impl TryFrom<&Image> for ImageToWrite {
+    type Error = Error;
+
+    fn try_from(image: &Image) -> Result<Self> {
+        let mut image_to_write = Self {
+            head: RawImageHead::from(&image.version),
+            infos: Vec::new(),
+            sha1sums: Vec::new(),
+            data_head_infos: Vec::new(),
+            data_body: Vec::new(),
+        };
+        let mut ddr_usb = None;
+        let mut uboot_usb = None;
+        let mut generic_items = Vec::new();
+        for item in image.items.iter() {
+            if item.extension == "USB" {
+                match item.stem.as_str() {
+                    "DDR" => {
+                        if ddr_usb.is_some() {
+                            eprintln!("Duplicated DDR.USB, refuse to write");
+                            return Err(ImageError::DuplicatedItem { 
+                                stem: "DDR".into(), 
+                                extension: "USB".into() }.into())
+                        }
+                        ddr_usb = Some(item);
+                    },
+                    "UBOOT" => {
+                        if uboot_usb.is_some() {
+                            eprintln!("Duplicated UBOOT.USB, refuse to write");
+                            return Err(ImageError::DuplicatedItem { 
+                                stem: "UBOOT".into(), 
+                                extension: "USB".into() }.into())
+                        }
+                        uboot_usb = Some(item);
+                    },
+                    _ => {
+                        println!("Warning: unexpected {}.USB", item.stem);
+                        generic_items.push(item)
+                    }
+                }
+            } else {
+                generic_items.push(item)
+            }
+        }
+        let ddr_usb = match ddr_usb {
+            Some(ddr_usb) => ddr_usb,
+            None => {
+                eprintln!("DDR.USB does not exist, refuse to write");
+                return Err(ImageError::MissingItem { 
+                    stem: "DDR".into(), extension: "USB".into() }.into())
+            },
+        };
+        let uboot_usb = match uboot_usb {
+            Some(uboot_usb) => uboot_usb,
+            None => {
+                eprintln!("UBOOT.USB does not exist, refuse to write");
+                return Err(ImageError::MissingItem { 
+                    stem: "UBOOT".into(), extension: "USB".into() }.into())
+            },
+        };
+        generic_items.sort_by(|some, other| {
+            let order_stem = some.stem.cmp(&other.stem);
+            if order_stem == std::cmp::Ordering::Equal {
+                some.extension.cmp(&other.extension)
+            } else {
+                order_stem
+            }
+        });
+        println!("Combining image...");
+        image_to_write.append_item(ddr_usb)?;
+        image_to_write.append_item(uboot_usb)?;
+        for item in generic_items.iter_mut() {
+            image_to_write.append_item(item)?
+        }
+        image_to_write.finalize(&image.version)?;
+        println!("Cauculating CRC32 of image...");
+        let mut crc32_hasher = crate::crc32::Crc32Hasher::new();
+        crc32_hasher.update(&image_to_write.data_head_infos[4..]);
+        crc32_hasher.update(&image_to_write.data_body);
+        image_to_write.head.crc = crc32_hasher.value;
+        let pointer = 
+            image_to_write.data_head_infos.as_ptr() as *mut u32;
+        unsafe {*pointer = crc32_hasher.value};
+        println!("CRC32 of image is {:x}", crc32_hasher.value);
+        Ok(image_to_write)
+    }
 }

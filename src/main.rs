@@ -5,6 +5,7 @@ use clap::Parser;
 use hex::FromHex;
 use sha1::Digest;
 
+mod crc32;
 mod error;
 mod image;
 mod pointer;
@@ -28,7 +29,7 @@ enum Action {
         in_file: String,
         /// Path of dir to output, would be deleted if exists, and then created
         out_dir: String,
-        #[arg(short = 's', long)]
+        #[arg(long)]
         /// Do not verify items
         no_verify: bool,
     },
@@ -37,7 +38,10 @@ enum Action {
         /// Path of the input file
         in_file: String,
         /// Path of the output file
-        out_file: String
+        out_file: String,
+        #[arg(long)]
+        /// Do not verify input image
+        no_verify: bool,
     },
     /// (Re)pack partition files into an image
     Pack {
@@ -60,24 +64,54 @@ struct Arg {
     imgver: Option<image::ImageVersion>,
 }
 
-fn verify<P: AsRef<Path>>(image: P) -> Result<()> {
-    let image = image::Image::try_read_file(image)?;
+fn verify<P: AsRef<Path>>(in_file: P) -> Result<()> {
+    let in_file = in_file.as_ref();
+    println!("Verifying image at '{}'", in_file.display());
+    let image = image::Image::try_read_file(in_file)?;
     image.verify()?;
     image.print_table_stdout();
+    println!("Verified image at '{}'", in_file.display());
     Ok(())
 }
 
-fn unpack<P1, P2>(image: P1, outdir: P2, no_verify: bool) -> Result<()>
+fn unpack<P1, P2>(in_file: P1, out_dir: P2, no_verify: bool) -> Result<()>
 where
     P1: AsRef<Path>,
     P2: AsRef<Path>
 {
-    let image = image::Image::try_read_file(image)?;
+    let in_file = in_file.as_ref();
+    let out_dir = out_dir.as_ref();
+    println!("Unpacking image '{}' to '{}'", in_file.display(), out_dir.display());
+    let image = image::Image::try_read_file(in_file)?;
     if ! no_verify {
         image.verify()?
     }
     image.print_table_stdout();
-    image.try_write_dir(&outdir)?;
+    image.try_write_dir(&out_dir)?;
+    println!("Unpacked image '{}' to '{}'", in_file.display(), out_dir.display());
+    Ok(())
+}
+
+fn convert<P1, P2>(in_file: P1, out_file: P2, no_verify: bool) -> Result<()>
+where
+    P1: AsRef<Path>,
+    P2: AsRef<Path>
+{
+    let in_file = in_file.as_ref();
+    let out_file = out_file.as_ref();
+    println!("Converting image '{}' to '{}'", in_file.display(), out_file.display());
+    let mut image = image::Image::try_read_file(&in_file)?;
+    if no_verify {
+        image.print_table_stdout();
+        image.clear_verify()
+    } else {
+        image.verify()?;
+        image.print_table_stdout()
+    }
+    image.fill_verify()?;
+    image.print_table_stdout();
+    image.try_write_file(&out_file)?;
+    println!("Converted image '{}' to '{}'", in_file.display(), out_file.display());
     Ok(())
 }
 
@@ -86,7 +120,7 @@ fn main() -> Result<()> {
     match arg.action {
         Action::Verify { in_file } => verify(in_file),
         Action::Unpack { in_file, out_dir , no_verify} => unpack(in_file, out_dir, no_verify),
+        Action::Convert { in_file, out_file, no_verify } => convert(in_file, out_file, no_verify),
         Action::Pack { in_dir, out_file } => todo!(),
-        Action::Convert { in_file, out_file } => todo!(),
     }
 }
