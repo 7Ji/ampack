@@ -767,12 +767,12 @@ impl ImageToWrite {
             self.data_body.extend_from_slice(&item.data);
             let remaining =  self.data_body.len() % align_size;
             if remaining > 0 {
-                for _ in remaining..4 {
+                for _ in remaining..align_size {
                     self.data_body.push(0)
                 }
             }
         }
-        let end = (offset as usize + item.data.len() + 3) / align_size * align_size;
+        let end = (offset as usize + item.data.len() + align_size - 1) / align_size * align_size;
         let info = RawItemInfo {
             item_id: self.infos.len() as u32,
             file_type: 
