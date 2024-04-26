@@ -608,11 +608,11 @@ impl Image {
         let image_to_write = ImageToWrite::try_from(self)?;
         let mut out_file = File::create(file.as_ref())?;
         let progress_bar = ProgressBar::new(
-            (image_to_write.data_head_infos.len() + 
-                    image_to_write.data_body.len()) as u64);
+            ((image_to_write.data_head_infos.len() + 
+                    image_to_write.data_body.len()) / 0x100000) as u64);
         progress_bar.set_style(ProgressStyle::with_template(
             "Writing image => \
-                [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7}"
+                [{elapsed_precise}] {bar:40.cyan/blue} {pos:>5}/{len:5} MiB"
             ).unwrap());
         // progress_bar.enable_steady_tick(Duration::from_secs(1));
         for chunk in 
@@ -620,7 +620,7 @@ impl Image {
                 image_to_write.data_body.chunks(0x100000)) 
         {
             out_file.write_all(chunk)?;
-            progress_bar.inc(chunk.len() as u64)
+            progress_bar.inc(1)
         }
         progress_bar.finish_and_clear();
         Ok(())
@@ -848,17 +848,33 @@ impl TryFrom<&Image> for ImageToWrite {
                 order_stem
             }
         });
-        println!("Combining image...");
+        let mut progress_bar = ProgressBar::new(image.items.len() as u64);
+        progress_bar.set_style(ProgressStyle::with_template(
+            "Combining image => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>3}/{len:3} {msg}").unwrap());
+        progress_bar.set_message("DDR.USB");
         image_to_write.append_item(ddr_usb)?;
+        progress_bar.inc(1);
+        progress_bar.set_message("UBOOT.USB");
         image_to_write.append_item(uboot_usb)?;
+        progress_bar.inc(1);
         for item in generic_items.iter_mut() {
-            image_to_write.append_item(item)?
+            progress_bar.set_message(format!("{}.{}", item.stem, item.extension));
+            image_to_write.append_item(item)?;
+            progress_bar.inc(1);
         }
+        progress_bar.set_message("finalizing...");
+        progress_bar.finish_and_clear();
         image_to_write.finalize(&image.version)?;
-        println!("Cauculating CRC32 of image...");
+        progress_bar = ProgressBar::new(
+            ((image_to_write.data_head_infos.len() + 
+                    image_to_write.data_body.len() - 4) / 0x100000
+                ) as u64);
+        progress_bar.set_style(ProgressStyle::with_template(
+            "Calculating CRC32 => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>5}/{len:5} MiB").unwrap());
         let mut crc32_hasher = crate::crc32::Crc32Hasher::new();
-        crc32_hasher.update(&image_to_write.data_head_infos[4..]);
-        crc32_hasher.update(&image_to_write.data_body);
+        crc32_hasher.udpate_with_bar(&image_to_write.data_head_infos[4..], &mut progress_bar);
+        crc32_hasher.udpate_with_bar(&image_to_write.data_body, &mut progress_bar);
+        progress_bar.finish_and_clear();
         image_to_write.head.crc = crc32_hasher.value;
         let pointer = 
             image_to_write.data_head_infos.as_ptr() as *mut u32;

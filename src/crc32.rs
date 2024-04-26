@@ -1,5 +1,7 @@
 use std::{fs::File, io::{Read, Seek}, path::Path};
 
+use indicatif::ProgressBar;
+
 use crate::{Error, Result};
 
 #[derive(Clone, Copy)]
@@ -48,12 +50,19 @@ impl Crc32Hasher {
     pub(crate) fn update(&mut self, data: &[u8]) {
         for byte in data.iter() {
             let lookup_id = (self.value ^ *byte as u32) & 0xff;
-            // println!("Lookup id is {}", lookup_id);
             let lookup_value = self.table.table[lookup_id as usize];
-            // println!("Lookup value is {:x}", lookup_value);
             self.value = lookup_value ^ self.value >> 8;
-            // self.value = CRC_TABLE[((*byte as u32 ^ self.value) & 0xff) as usize] ^ self.value >> 8;
-            // println!("Updated to {:x}", self.value);
+        }
+    }
+
+    pub(crate) fn udpate_with_bar(&mut self, data: &[u8], bar: &mut ProgressBar) {
+        for chunk in data.chunks(0x100000) {
+            for byte in chunk.iter() {
+                let lookup_id = (self.value ^ *byte as u32) & 0xff;
+                let lookup_value = self.table.table[lookup_id as usize];
+                self.value = lookup_value ^ self.value >> 8;
+            }
+            bar.inc(1)
         }
     }
 

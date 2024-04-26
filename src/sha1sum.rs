@@ -32,9 +32,8 @@ impl Sha1sum {
 
     pub(crate) fn from_data_with_bar(data: &[u8], bar: &mut ProgressBar) -> Self {
         const STEP: usize = 0x100000;
-        let len = data.len() / STEP;
         let mut hasher = Sha1::new();
-        for (id, chunk) in data.chunks(STEP).enumerate() {
+        for chunk in data.chunks(STEP) {
             // bar.set_message(format!("{}/{}", id, suffix));
             hasher.update(chunk);
             bar.inc(1);
