@@ -1,6 +1,6 @@
-use std::{cmp::min, ffi::{CStr, CString}, fmt::Display, fs::{create_dir_all, remove_dir_all, remove_file, File}, io::{Read, Seek, Write}, ops::{Deref, DerefMut}, path::Path, time::Duration};
+use std::{cmp::{min, Ordering}, ffi::CStr, fmt::Display, fs::{create_dir_all, read_dir, remove_dir_all, remove_file, File}, io::{Read, Seek, Write}, path::Path, time::Duration};
 
-use cli_table::{Cell, Style, Table, Row, format::Justify};
+use cli_table::{Cell, Style, Table, format::Justify};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::{Serialize, Deserialize};
 
@@ -11,8 +11,6 @@ use crate::{sha1sum::Sha1sum, Error, Result};
 const MAGIC: u32 = 0x27b51956;
 const FILE_TYPE_GENERIC: u32 = 0;
 const FILE_TYPE_SPARSE: u32 = 254;
-const CURRENT_OFFSET_IN_ITEM: u64 = 0;
-const ANDROID_SPARSE_IMAGE_MAGIC: u64 = 0xed26ff3a;
 const ANDROID_SPARSE_IMAGE_MAGIC_BYTES: [u8; 4] = [0x3a, 0xff, 0x26, 0xed];
 
 #[derive(Debug)]
@@ -84,7 +82,6 @@ impl Display for ImageVersion {
             match self {
                 ImageVersion::V1 => "v1",
                 ImageVersion::V2 => "v2",
-                // ImageVersion::V3 => "v3",
             }
         )
     }
@@ -95,7 +92,6 @@ impl ImageVersion {
         match self {
             ImageVersion::V1 => SIZE_RAW_ITEM_INFO_V1,
             ImageVersion::V2 => SIZE_RAW_ITEM_INFO_V2,
-            // ImageVersion::V3 => SIZE_RAW_ITEM_INFO_V3,
         }
     }
 
@@ -285,12 +281,158 @@ macro_rules! cell_bold_center {
         $raw.cell().bold(true).justify(Justify::Center)
     };
 }
+struct Essentials<'a> {
+    ddr_usb: &'a Item,
+    uboot_usb: &'a Item,
+    aml_sdc_burn_ini: &'a Item,
+    meson1_dtb: &'a Item,
+    platform_conf: &'a Item
+}
 
-impl TryFrom<&Path> for Image {
+impl<'a> TryFrom<&'a Image> for Essentials<'a> {
     type Error = Error;
 
-    fn try_from(value: &Path) -> Result<Self> {
-        let mut file = File::open(value)?;
+    fn try_from(image: &'a Image) -> Result<Self> {
+        Ok(Self {
+            ddr_usb: image.find_item("DDR", "USB")?,
+            uboot_usb: image.find_item("UBOOT", "USB")?,
+            aml_sdc_burn_ini: image.find_item("aml_sdc_burn", "ini")?,
+            meson1_dtb: image.find_item("meson1", "dtb")?,
+            platform_conf: image.find_item("platform", "conf")?,
+        })
+    }
+}
+
+fn sort_ref_items_by_name(some: &&Item, other: &&Item) -> Ordering {
+    let order_stem = some.stem.cmp(&other.stem);
+    if order_stem == std::cmp::Ordering::Equal {
+        some.extension.cmp(&other.extension)
+    } else {
+        order_stem
+    }
+}
+
+fn sort_items_by_name(some: &Item, other: &Item) -> Ordering {
+    let order_stem = some.stem.cmp(&other.stem);
+    if order_stem == std::cmp::Ordering::Equal {
+        some.extension.cmp(&other.extension)
+    } else {
+        order_stem
+    }
+}
+
+impl Image {
+    fn find_item(&self, stem: &str, extension: &str) -> Result<&Item> {
+        let mut result = None;
+
+        for item in self.items.iter() {
+            if item.stem == stem && item.extension == extension {
+                if result.is_some() {
+                    eprintln!("Duplicated image item: {}.{}", stem, extension);
+                    return Err(ImageError::DuplicatedItem { 
+                        stem: stem.into(), extension: extension.into()}.into());
+                }
+                result = Some(item);
+            }
+        }
+        match result {
+            Some(item) => Ok(item),
+            None => {
+                eprintln!("Missing image item: {}.{}", stem, extension);
+                Err(ImageError::MissingItem { 
+                    stem: stem.into(), extension: extension.into() }.into())
+            }
+        }
+    }
+
+    fn find_item_verified(&self, stem: &str, extension: &str) -> Result<&Item> {
+        match self.find_item(stem, extension) {
+            Ok(item) => 
+                if item.sha1sum.is_some() {
+                    Ok(item)
+                } else {
+                    eprintln!("Item {}.{} is not verified", stem, extension);
+                    Err(ImageError::UnmatchedVerify.into())
+                },
+            Err(e) => Err(e),
+        }
+    }
+
+    fn partitions(&self) -> Vec<&Item> {
+        self.items.iter().filter(
+            |item|item.extension == "PARTITION").collect()
+    }
+
+    pub(crate) fn verify(&self) -> Result<()> {
+        let _ = Essentials::try_from(self)?;
+        let need_verifies: Vec<&Item> = self.items.iter().filter(
+            |item|item.sha1sum.is_some()).collect();
+        let multiprogress = MultiProgress::new();
+        let mut mapped: Vec<(&Item, String, ProgressBar)> = need_verifies.iter().map(
+        |item|
+        {
+            let name = format!("{}.{}", item.stem, item.extension);
+            let progress_bar = multiprogress.add(ProgressBar::new(item.data.len() as u64 / 0x100000));
+            progress_bar.set_style(ProgressStyle::with_template(&format!("Verifying item => {} {}", "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>5}/{len:>5} MiB", name)).unwrap());
+            progress_bar.set_message("Waiting for start...");
+            (*item, name, progress_bar)
+        }).collect();
+        use rayon::prelude::*;
+        let result = mapped.par_iter_mut().map(|(item, name, ref mut progress_bar)| {
+            let sha1sum_record = item.sha1sum.as_ref().expect("Sha1sum not recorded");
+            let sha1sum_calculated = Sha1sum::from_data_with_bar(&item.data, progress_bar);
+            if sha1sum_record != &sha1sum_calculated {
+                eprintln!("Recorded SHA1sum ({}) different from calculated \
+                    SHA1sum ({}) for item '{}'", sha1sum_record, 
+                    sha1sum_calculated, name);
+                return Err(Error::ImageError(ImageError::IllegalVerify));
+            }
+            Ok(())
+        }).find_first(|r|r.is_err());
+        multiprogress.clear().unwrap();
+        if let Some(r) = result {
+            if let Err(e) = r {
+                return Err(e)
+            } else {
+                eprintln!("Unexpected: Filtered error still results in OK");
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn clear_verify(&mut self) {
+        for item in self.items.iter_mut() {
+            item.sha1sum = None
+        }
+    }
+
+    pub(crate) fn fill_verify(&mut self) -> Result<()> {
+        let mut need_verifies: Vec<&mut Item> = self.items.iter_mut().filter(
+            |item|item.sha1sum.is_none()).collect();
+        let multiprogress = MultiProgress::new();
+        let mut mapped: Vec<(&Item, ProgressBar)> = need_verifies.iter().map(
+        |item|
+        {
+            let name = format!("{}.{}", item.stem, item.extension);
+            let progress_bar = multiprogress.add(ProgressBar::new(item.data.len() as u64 / 0x100000));
+            progress_bar.set_style(ProgressStyle::with_template(&format!("Generating verify => {} {}", "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>5}/{len:>5} MiB", name)).unwrap());
+            progress_bar.set_message("Waiting for start...");
+            (item as &Item, progress_bar)
+        }).collect();
+        use rayon::prelude::*;
+        let sha1sums: Vec<Sha1sum> = mapped.par_iter_mut().map(|(item, ref mut progress_bar)| {
+            Sha1sum::from_data_with_bar(&item.data, progress_bar)
+        }).collect();
+        multiprogress.clear().unwrap();
+        for (item, sha1sum) in need_verifies.iter_mut().zip(sha1sums.into_iter()) {
+            item.sha1sum = Some(sha1sum)
+        }
+        Ok(())
+    }
+
+    pub(crate) fn try_read_file<P: AsRef<Path>>(file: P) -> Result<Self> {
+        let path_file = file.as_ref();
+        let mut file = File::open(path_file)?;
         let mut buffer = [0; 0x10000];
         file.read_exact(&mut buffer[0..SIZE_RAW_IMAGE_HEAD])?;
         let header = unsafe {
@@ -307,7 +449,6 @@ impl TryFrom<&Path> for Image {
         let mut items = Vec::new();
         let mut need_verify: Option<Item> = None;
         let mut rows = Vec::new();
-        // println!("Reading image...");
         let progress_bar = ProgressBar::new(header.item_count.into());
         progress_bar.set_style(ProgressStyle::with_template(
             "Reading image => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}").unwrap());
@@ -322,7 +463,6 @@ impl TryFrom<&Path> for Image {
                 ImageVersion::V1 => unsafe {(pointer as *const RawItemInfoV1).read()}.into(),
                 ImageVersion::V2 => unsafe {(pointer as *const RawItemInfoV2).read()}.into(),
             };
-            // progress_bar.message(item_info.item_main_type);
             progress_bar.set_message(format!("{}.{}", 
                 item_info.item_sub_type, item_info.item_main_type));
             file.seek(std::io::SeekFrom::Start(item_info.offset_in_image))?;
@@ -416,142 +556,95 @@ impl TryFrom<&Path> for Image {
             align: header.item_align_size,
             items,
         })
+        // file.as_ref().try_into()
     }
-}
 
-struct Essentials<'a> {
-    ddr_usb: &'a Item,
-    uboot_usb: &'a Item,
-    aml_sdc_burn_init: &'a Item,
-    meson1_dtb: &'a Item,
-    platform_conf: &'a Item
-}
-
-impl<'a> TryFrom<&'a Image> for Essentials<'a> {
-    type Error = Error;
-
-    fn try_from(image: &'a Image) -> Result<Self> {
-        Ok(Self {
-            ddr_usb: image.find_item("DDR", "USB")?,
-            uboot_usb: image.find_item("UBOOT", "USB")?,
-            aml_sdc_burn_init: image.find_item("aml_sdc_burn", "ini")?,
-            meson1_dtb: image.find_item("meson1", "dtb")?,
-            platform_conf: image.find_item("platform", "conf")?,
-        })
-    }
-}
-
-impl Image {
-    fn find_item(&self, stem: &str, extension: &str) -> Result<&Item> {
-        let mut result = None;
-
-        for item in self.items.iter() {
-            if item.stem == stem && item.extension == extension {
-                if result.is_some() {
-                    eprintln!("Duplicated image item: {}.{}", stem, extension);
-                    return Err(ImageError::DuplicatedItem { 
-                        stem: stem.into(), extension: extension.into()}.into());
-                }
-                result = Some(item);
-            }
+    pub(crate) fn try_read_dir<P: AsRef<Path>>(dir: P) -> Result<Self> {
+        let path_dir = dir.as_ref();
+        let mut entries = Vec::new();
+        for entry in read_dir(path_dir)? {
+            let entry = entry?;
+            entries.push(entry)
         }
-        match result {
-            Some(item) => Ok(item),
-            None => {
-                eprintln!("Missing image item: {}.{}", stem, extension);
-                Err(ImageError::MissingItem { 
-                    stem: stem.into(), extension: extension.into() }.into())
-            }
-        }
-    }
-
-    fn find_item_verified(&self, stem: &str, extension: &str) -> Result<&Item> {
-        match self.find_item(stem, extension) {
-            Ok(item) => 
-                if item.sha1sum.is_some() {
-                    Ok(item)
-                } else {
-                    eprintln!("Item {}.{} is not verified", stem, extension);
-                    Err(ImageError::UnmatchedVerify.into())
+        let mut progress_bar = ProgressBar::new(entries.len() as u64);
+        progress_bar.set_style(ProgressStyle::with_template(
+            "Reading items => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>3}/{len:3} {msg}").unwrap());
+        progress_bar.enable_steady_tick(Duration::from_secs(1));
+        let mut uboot_usb = None;
+        let mut ddr_usb = None;
+        let mut aml_sdc_burn_ini = None;
+        let mut meson1_dtb = None;
+        let mut platform_conf = None;
+        let mut generic_items = Vec::new();
+        for entry in entries {
+            progress_bar.set_message(entry.file_name().to_string_lossy().into_owned());
+            let path_entry = entry.path();
+            let stem = match path_entry.file_stem() {
+                Some(stem) => stem,
+                None => {
+                    progress_bar.inc(1);
+                    continue
                 },
-            Err(e) => Err(e),
-        }
-    }
-
-    fn partitions(&self) -> Vec<&Item> {
-        self.items.iter().filter(
-            |item|item.extension == "PARTITION").collect()
-    }
-
-    pub(crate) fn verify(&self) -> Result<()> {
-        let essentials = Essentials::try_from(self)?;
-        let need_verifies: Vec<&Item> = self.items.iter().filter(
-            |item|item.sha1sum.is_some()).collect();
-        let multiprogress = MultiProgress::new();
-        let mut mapped: Vec<(&Item, String, ProgressBar)> = need_verifies.iter().map(
-        |item|
-        {
-            let name = format!("{}.{}", item.stem, item.extension);
-            let progress_bar = multiprogress.add(ProgressBar::new(item.data.len() as u64 / 0x100000));
-            progress_bar.set_style(ProgressStyle::with_template(&format!("Verifying item => {} {}", "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>5}/{len:>5} MiB", name)).unwrap());
-            progress_bar.set_message("Waiting for start...");
-            (*item, name, progress_bar)
-        }).collect();
-        use rayon::prelude::*;
-        let result = mapped.par_iter_mut().map(|(item, name, ref mut progress_bar)| {
-            let sha1sum_record = item.sha1sum.as_ref().expect("Sha1sum not recorded");
-            let sha1sum_calculated = Sha1sum::from_data_with_bar(&item.data, progress_bar);
-            if sha1sum_record != &sha1sum_calculated {
-                eprintln!("Recorded SHA1sum ({}) different from calculated \
-                    SHA1sum ({}) for item '{}'", sha1sum_record, 
-                    sha1sum_calculated, name);
-                return Err(Error::ImageError(ImageError::IllegalVerify));
+            };
+            let extension = match path_entry.extension() {
+                Some(extension) => extension,
+                None => {
+                    progress_bar.inc(1);
+                    continue
+                },
+            };
+            let mut data = Vec::new();
+            let mut file = File::open(&path_entry)?;
+            file.read_to_end(&mut data)?;
+            let item = Item {
+                data,
+                extension: extension.to_string_lossy().into(),
+                stem: stem.to_string_lossy().into(),
+                sha1sum: None,
+            };
+            match (item.stem.as_ref(), item.extension.as_ref()) {
+                ("DDR", "USB") => ddr_usb = Some(item),
+                ("UBOOT", "USB") => uboot_usb = Some(item),
+                ("aml_sdc_burn", "ini") => aml_sdc_burn_ini = Some(item),
+                ("meson1", "dtb") => meson1_dtb = Some(item),
+                ("platform", "conf") => platform_conf = Some(item),
+                _ => generic_items.push(item)
             }
-            Ok(())
-        }).find_first(|r|r.is_err());
-        multiprogress.clear().unwrap();
-        if let Some(r) = result {
-            if let Err(e) = r {
-                return Err(e)
-            } else {
-                eprintln!("Unexpected: Filtered error still results in OK");
+            progress_bar.inc(1);
+        }
+        progress_bar.finish_and_clear();
+        let mut items = Vec::new();
+        for (item, stem) in [(ddr_usb, "DDR"), (uboot_usb, "UBOOT")] {
+            match item {
+                Some(item) => items.push(item),
+                None => {
+                    eprintln!("Essential {}.USB file does not exist", stem);
+                    return Err(ImageError::MissingItem { 
+                        stem: stem.into(), extension: "USB".into() }.into());
+                },
             }
         }
-        Ok(())
-    }
-
-    pub(crate) fn clear_verify(&mut self) {
-        for item in self.items.iter_mut() {
-            item.sha1sum = None
-        }
-    }
-
-    pub(crate) fn fill_verify(&mut self) -> Result<()> {
-        let mut need_verifies: Vec<&mut Item> = self.items.iter_mut().filter(
-            |item|item.sha1sum.is_none()).collect();
-        let multiprogress = MultiProgress::new();
-        let mut mapped: Vec<(&Item, ProgressBar)> = need_verifies.iter().map(
-        |item|
+        for (item, stem, extension) in [
+            (aml_sdc_burn_ini, "aml_sdc_burn", "ini"),
+            (meson1_dtb, "meson1", "dtb"),
+            (platform_conf, "platform", "conf")] 
         {
-            let name = format!("{}.{}", item.stem, item.extension);
-            let progress_bar = multiprogress.add(ProgressBar::new(item.data.len() as u64 / 0x100000));
-            progress_bar.set_style(ProgressStyle::with_template(&format!("Generating verify => {} {}", "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>5}/{len:>5} MiB", name)).unwrap());
-            progress_bar.set_message("Waiting for start...");
-            (item as &Item, progress_bar)
-        }).collect();
-        use rayon::prelude::*;
-        let sha1sums: Vec<Sha1sum> = mapped.par_iter_mut().map(|(item, ref mut progress_bar)| {
-            Sha1sum::from_data_with_bar(&item.data, progress_bar)
-        }).collect();
-        multiprogress.clear().unwrap();
-        for (item, sha1sum) in need_verifies.iter_mut().zip(sha1sums.into_iter()) {
-            item.sha1sum = Some(sha1sum)
+            match item {
+                Some(item) => generic_items.push(item),
+                None => {
+                    eprintln!("Essential {}.{} file does not exist", stem, extension);
+                    return Err(ImageError::MissingItem { 
+                        stem: stem.into(), extension: extension.into()}.into())
+                }
+            }
         }
-        Ok(())
-    }
-
-    pub(crate) fn try_read_file<P: AsRef<Path>>(file: P) -> Result<Self> {
-        file.as_ref().try_into()
+        generic_items.sort_by(sort_items_by_name);
+        items.append(&mut generic_items);
+        Ok(Self {
+            version: ImageVersion::V2,
+            align: 4,
+            items,
+        })
     }
 
     pub(crate) fn print_table_stdout(&self) -> () {
@@ -840,14 +933,7 @@ impl TryFrom<&Image> for ImageToWrite {
                     stem: "UBOOT".into(), extension: "USB".into() }.into())
             },
         };
-        generic_items.sort_by(|some, other| {
-            let order_stem = some.stem.cmp(&other.stem);
-            if order_stem == std::cmp::Ordering::Equal {
-                some.extension.cmp(&other.extension)
-            } else {
-                order_stem
-            }
-        });
+        generic_items.sort_by(sort_ref_items_by_name);
         let mut progress_bar = ProgressBar::new(image.items.len() as u64);
         progress_bar.set_style(ProgressStyle::with_template(
             "Combining image => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>3}/{len:3} {msg}").unwrap());
