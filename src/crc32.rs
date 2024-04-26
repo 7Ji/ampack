@@ -2,7 +2,7 @@ use std::{fs::File, io::{Read, Seek}, path::Path};
 
 use indicatif::ProgressBar;
 
-use crate::{Error, Result};
+use crate::Result;
 
 #[derive(Clone, Copy)]
 struct Crc32Table {
@@ -55,7 +55,7 @@ impl Crc32Hasher {
         }
     }
 
-    pub(crate) fn udpate_with_bar(&mut self, data: &[u8], bar: &mut ProgressBar) {
+    pub(crate) fn udpate_with_bar(&mut self, data: &[u8], bar: &ProgressBar) {
         for chunk in data.chunks(0x100000) {
             for byte in chunk.iter() {
                 let lookup_id = (self.value ^ *byte as u32) & 0xff;
@@ -77,7 +77,7 @@ impl Crc32Hasher {
         crc32
     }
 
-    pub(crate) fn try_from_image_file<P: AsRef<Path>>(file: P) -> Result<Self> {
+    pub(crate) fn try_hash_image_file<P: AsRef<Path>>(file: P) -> Result<Self> {
         let mut file = File::open(file)?;
         file.seek(std::io::SeekFrom::Start(4))?;
         Ok(Self::from_reader(file))

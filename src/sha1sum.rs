@@ -6,20 +6,12 @@ use indicatif::ProgressBar;
 use serde::{Serialize, Deserialize};
 use sha1::{Digest, Sha1};
 
-use crate::{Error, Result};
+use crate::Result;
 
 type Sha1sumByteArray = [u8; 20];
 
 #[derive(Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub(crate) struct Sha1sum(Sha1sumByteArray);
-
-// impl TryFrom<&[u8]> for Sha1sum {
-//     type Error = Error;
-
-//     fn try_from(value: &[u8]) -> Result<Self> {
-//         Ok(Self(Sha1sumByteArray::from_hex(value)?))
-//     }
-// }
 
 impl Sha1sum {
     pub(crate) fn from_hex(slice: &[u8]) -> Result<Self> {
@@ -30,7 +22,7 @@ impl Sha1sum {
         Self(Sha1::digest(data).into())
     }
 
-    pub(crate) fn from_data_with_bar(data: &[u8], bar: &mut ProgressBar) -> Self {
+    pub(crate) fn from_data_with_bar(data: &[u8], bar: &ProgressBar) -> Self {
         const STEP: usize = 0x100000;
         let mut hasher = Sha1::new();
         for chunk in data.chunks(STEP) {

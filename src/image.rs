@@ -43,6 +43,29 @@ impl Into<Error> for ImageError {
     }
 }
 
+impl Display for ImageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Image Error: ")?;
+        match self {
+            ImageError::InvalidMagic { magic } => 
+                write!(f, "Invalid Magic: 0x{:08x}", magic),
+            ImageError::IllegalVerify => 
+                write!(f, "Illegal Verify"),
+            ImageError::InvalidVersion { version } => 
+                write!(f, "Invalid Version: {}", version),
+            ImageError::UnmatchedVerify => 
+                write!(f, "Unmatched Verify"),
+            ImageError::DuplicatedItem { stem, extension } => 
+                write!(f, "Duplicated Item '{}.{}'", stem, extension),
+            ImageError::MissingItem { stem, extension } => 
+                write!(f, "Missing Item '{}.{}'", stem, extension),
+            ImageError::SizeMismatch { exptected, actual } => 
+                write!(f, "Size Mismatch (expected {} != actual {})",
+                    exptected, actual),
+        }
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, 
     clap::ValueEnum, Serialize, Deserialize)]
 pub(crate) enum ImageVersion {
@@ -92,13 +115,6 @@ impl ImageVersion {
         match self {
             ImageVersion::V1 => SIZE_RAW_ITEM_INFO_V1,
             ImageVersion::V2 => SIZE_RAW_ITEM_INFO_V2,
-        }
-    }
-
-    fn size_item_type(&self) -> usize {
-        match self {
-            ImageVersion::V1 => SIZE_ITEM_TYPE_V1,
-            ImageVersion::V2 => SIZE_ITEM_TYPE_V2,
         }
     }
 }
@@ -151,7 +167,7 @@ struct RawItemInfoVariableLength<const LEN: usize> {
     verify: u32,
     is_backup_item: u16,
     backup_item_id: u16,
-    reserve: [u8; 24],
+    _reserve: [u8; 24],
 }
 
 type RawItemInfoV1 = RawItemInfoVariableLength<SIZE_ITEM_TYPE_V1>;
@@ -226,7 +242,7 @@ impl<const LEN: usize> Into<RawItemInfoVariableLength<LEN>> for &RawItemInfo {
             verify: self.verify,
             is_backup_item: self.is_backup_item,
             backup_item_id: self.backup_item_id, 
-            reserve: [0; 24]
+            _reserve: [0; 24]
         }
     }
 }
@@ -281,27 +297,6 @@ macro_rules! cell_bold_center {
         $raw.cell().bold(true).justify(Justify::Center)
     };
 }
-struct Essentials<'a> {
-    ddr_usb: &'a Item,
-    uboot_usb: &'a Item,
-    aml_sdc_burn_ini: &'a Item,
-    meson1_dtb: &'a Item,
-    platform_conf: &'a Item
-}
-
-impl<'a> TryFrom<&'a Image> for Essentials<'a> {
-    type Error = Error;
-
-    fn try_from(image: &'a Image) -> Result<Self> {
-        Ok(Self {
-            ddr_usb: image.find_item("DDR", "USB")?,
-            uboot_usb: image.find_item("UBOOT", "USB")?,
-            aml_sdc_burn_ini: image.find_item("aml_sdc_burn", "ini")?,
-            meson1_dtb: image.find_item("meson1", "dtb")?,
-            platform_conf: image.find_item("platform", "conf")?,
-        })
-    }
-}
 
 fn sort_ref_items_by_name(some: &&Item, other: &&Item) -> Ordering {
     let order_stem = some.stem.cmp(&other.stem);
@@ -345,26 +340,18 @@ impl Image {
         }
     }
 
-    fn find_item_verified(&self, stem: &str, extension: &str) -> Result<&Item> {
-        match self.find_item(stem, extension) {
-            Ok(item) => 
-                if item.sha1sum.is_some() {
-                    Ok(item)
-                } else {
-                    eprintln!("Item {}.{} is not verified", stem, extension);
-                    Err(ImageError::UnmatchedVerify.into())
-                },
-            Err(e) => Err(e),
-        }
-    }
-
-    fn partitions(&self) -> Vec<&Item> {
-        self.items.iter().filter(
-            |item|item.extension == "PARTITION").collect()
+    fn find_essentials(&self) -> Result<(&Item, &Item, &Item, &Item, &Item)> {
+        Ok((
+            self.find_item("DDR", "USB")?,
+            self.find_item("UBOOT", "USB")?,
+            self.find_item("aml_sdc_burn", "ini")?,
+            self.find_item("meson1", "dtb")?,
+            self.find_item("platform", "conf")?,
+        ))
     }
 
     pub(crate) fn verify(&self) -> Result<()> {
-        let _ = Essentials::try_from(self)?;
+        let _ = self.find_essentials();
         let need_verifies: Vec<&Item> = self.items.iter().filter(
             |item|item.sha1sum.is_some()).collect();
         let multiprogress = MultiProgress::new();
@@ -378,7 +365,7 @@ impl Image {
             (*item, name, progress_bar)
         }).collect();
         use rayon::prelude::*;
-        let result = mapped.par_iter_mut().map(|(item, name, ref mut progress_bar)| {
+        let result = mapped.par_iter_mut().map(|(item, name, progress_bar)| {
             let sha1sum_record = item.sha1sum.as_ref().expect("Sha1sum not recorded");
             let sha1sum_calculated = Sha1sum::from_data_with_bar(&item.data, progress_bar);
             if sha1sum_record != &sha1sum_calculated {
@@ -420,7 +407,7 @@ impl Image {
             (item as &Item, progress_bar)
         }).collect();
         use rayon::prelude::*;
-        let sha1sums: Vec<Sha1sum> = mapped.par_iter_mut().map(|(item, ref mut progress_bar)| {
+        let sha1sums: Vec<Sha1sum> = mapped.par_iter_mut().map(|(item, progress_bar)| {
             Sha1sum::from_data_with_bar(&item.data, progress_bar)
         }).collect();
         multiprogress.clear().unwrap();
@@ -566,7 +553,7 @@ impl Image {
             let entry = entry?;
             entries.push(entry)
         }
-        let mut progress_bar = ProgressBar::new(entries.len() as u64);
+        let progress_bar = ProgressBar::new(entries.len() as u64);
         progress_bar.set_style(ProgressStyle::with_template(
             "Reading items => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>3}/{len:3} {msg}").unwrap());
         progress_bar.enable_steady_tick(Duration::from_secs(1));
@@ -934,7 +921,7 @@ impl TryFrom<&Image> for ImageToWrite {
             },
         };
         generic_items.sort_by(sort_ref_items_by_name);
-        let mut progress_bar = ProgressBar::new(image.items.len() as u64);
+        let progress_bar = ProgressBar::new(image.items.len() as u64);
         progress_bar.set_style(ProgressStyle::with_template(
             "Combining image => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>3}/{len:3} {msg}").unwrap());
         progress_bar.set_message("DDR.USB");
@@ -951,15 +938,15 @@ impl TryFrom<&Image> for ImageToWrite {
         progress_bar.set_message("finalizing...");
         progress_bar.finish_and_clear();
         image_to_write.finalize(&image.version)?;
-        progress_bar = ProgressBar::new(
+        let progress_bar = ProgressBar::new(
             ((image_to_write.data_head_infos.len() + 
                     image_to_write.data_body.len() - 4) / 0x100000
                 ) as u64);
         progress_bar.set_style(ProgressStyle::with_template(
             "Calculating CRC32 => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>5}/{len:5} MiB").unwrap());
         let mut crc32_hasher = crate::crc32::Crc32Hasher::new();
-        crc32_hasher.udpate_with_bar(&image_to_write.data_head_infos[4..], &mut progress_bar);
-        crc32_hasher.udpate_with_bar(&image_to_write.data_body, &mut progress_bar);
+        crc32_hasher.udpate_with_bar(&image_to_write.data_head_infos[4..], &progress_bar);
+        crc32_hasher.udpate_with_bar(&image_to_write.data_body, &progress_bar);
         progress_bar.finish_and_clear();
         image_to_write.head.crc = crc32_hasher.value;
         let pointer = 
