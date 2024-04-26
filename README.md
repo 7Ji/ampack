@@ -34,7 +34,7 @@ ampack verify [in file]
 ```
 Verifying an image file at `[in file]`, without unpacking it, this is useful to check a packed image or verify a downloaded image
 
-## Unpack
+### Unpack
 ```
 ampack unpack [in file] [out dir]
 ```
