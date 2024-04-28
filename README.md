@@ -1,6 +1,6 @@
 # AMpack, a tool to unpack / (re)pack AMLogic burning images
 
-This aims to replace `aml_image_v2_packer` and addtionally properly support v3 image format.
+This aims to replace `aml_image_v2_packer` and addtionally properly support future image format.
 
 As this work is based on heavy reverse-engineering without an open document to look up to, the result is not guaranteed. If you encounter any issue, please open an issue or a PR.
 
@@ -44,17 +44,25 @@ Unlike `aml_image_v2_packer`, `ampack` would not create `image.cfg` file, see be
 
 ### Convert
 ```
-ampack convert [in file] [out file]
+ampack convert (--out-ver [out ver]) (--out-align [out align]) [in file] [out file]
 ```
 Convert an image file at `[in file]` into another image file at `[out file]`, mostly  useful to convert images between different versions, also useful to check the accuracy of `ampack`: the `[out file]` should be a byte-to-byte re-created clone of `[in file]` if they share the same version.
 
+Optional arguments:
+- `--out-ver [out ver]` : set the version of output image, either `v1` or `v2` (default)
+- `--out-align [out align]` : set the alignment of items in output image, multiply of 4, default is 4, and Amlogic uses 8 for their Android >= 11 images, but it's not necessary to follow them
+
 ### Pack
 ```
-ampack pack [in dir] [out file]
+ampack pack (--out-ver [out ver]) (--out-align [out align]) [in dir] [out file]
 ```
 Pack files and partitions under folder `[in dir]` into an image file at `[out file]`.
 
 Unlike `aml_image_v2_packer`, `ampack` does not expect an `image.cfg` file, rather, it automatically identifies file types under the folder, and check and sort them to guarantee a working image.
+
+Optional arguments:
+- `--out-ver [out ver]` : set the version of output image, either `v1` or `v2` (default)
+- `--out-align [out align]` : set the alignment of items in output image, multiply of 4, default is 4, and Amlogic uses 8 for their Android >= 11 images, but it's not necessary to follow them
 
 ### Crc32
 ```
