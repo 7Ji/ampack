@@ -16,7 +16,7 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use std::{fs::File, io::{Read, Seek}, path::Path};
+use std::{fs::File, io::Read, path::Path};
 
 use indicatif::ProgressBar;
 
@@ -92,7 +92,10 @@ impl Crc32Hasher {
 
     pub(crate) fn try_hash_image_file<P: AsRef<Path>>(file: P) -> Result<Self> {
         let mut file = File::open(file)?;
-        file.seek(std::io::SeekFrom::Start(4))?;
+        let mut buffer = [0; 4];
+        file.read_exact(&mut buffer)?;
+        println!("CRC32 checksum recorded in file is 0x{:02x}{:02x}{:02x}{:02x}",
+            buffer[3], buffer[2], buffer[1], buffer[0]);
         Ok(Self::from_reader(file))
     }
 }
