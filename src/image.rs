@@ -149,22 +149,16 @@ struct RawImageHead {
 }
 
 impl RawImageHead {
-    fn new(version: &ImageVersion) -> Self {
+    fn new(version: &ImageVersion, item_align_size: u32) -> Self {
         Self {
             crc: 0,
             version: version.into(),
             magic: MAGIC,
             image_size: 0,
-            item_align_size: 4,
+            item_align_size,
             item_count: 0,
             _reserve: [0; 36],
         }
-    }
-}
-
-impl From<&ImageVersion> for RawImageHead {
-    fn from(value: &ImageVersion) -> Self {
-        Self::new(value)
     }
 }
 
@@ -723,9 +717,24 @@ impl Image {
         progress_bar.finish_and_clear();
         Ok(())
     }
+
+    fn guess_align_size(&self) -> u32 {
+        if self.find_item("super", "PARTITION").is_err() {
+            return 4
+        }
+        for item in self.items.iter() {
+            if item.extension != "PARTITION" {
+                continue
+            }
+            if item.stem.ends_with("_a") {
+                println!("Use align size 8 for images >= Android 11 with super \
+                    partition and A/B partitioning");
+                return 8
+            }
+        }
+        4
+    }
 }
-
-
 
 struct ImageToWrite {
     head: RawImageHead,
@@ -761,18 +770,13 @@ impl ImageToWrite {
         let mut offset = offset as usize;
         let align_size = self.head.item_align_size as usize;
         
-        // let remaining = self.data_body.len() % self.head.item_align_size as usize
         if is_backup_item == 0 { // Not a backup item
-            offset = self.data_body.len();
-            self.data_body.extend_from_slice(&item.data);
-            let remaining =  self.data_body.len() % align_size;
-            if remaining > 0 {
-                for _ in remaining..align_size {
-                    self.data_body.push(0)
-                }
+            offset = (self.data_body.len() + align_size - 1) / align_size * align_size;
+            for _ in self.data_body.len() .. offset {
+                self.data_body.push(0)
             }
+            self.data_body.extend_from_slice(&item.data);
         }
-        let end = (offset as usize + item.data.len() + align_size - 1) / align_size * align_size;
         let info = RawItemInfo {
             item_id: self.infos.len() as u32,
             file_type: 
@@ -795,8 +799,8 @@ impl ImageToWrite {
         self.infos.push(info);
         self.sha1sums.push(sha1sum.clone());
         self.head.item_count += 1;
+        offset += item.data.len();
         if item.extension == "PARTITION" {
-            offset = end;
             if is_backup_item == 0 {
                 let content = format!("sha1sum {}", sha1sum);
                 let bytes = content.as_bytes();
@@ -883,7 +887,7 @@ impl TryFrom<&Image> for ImageToWrite {
 
     fn try_from(image: &Image) -> Result<Self> {
         let mut image_to_write = Self {
-            head: RawImageHead::from(&image.version),
+            head: RawImageHead::new(&image.version, image.guess_align_size()),
             infos: Vec::new(),
             sha1sums: Vec::new(),
             data_head_infos: Vec::new(),

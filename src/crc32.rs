@@ -67,19 +67,15 @@ impl Crc32Hasher {
 
     pub(crate) fn update(&mut self, data: &[u8]) {
         for byte in data.iter() {
-            let lookup_id = (self.value ^ *byte as u32) & 0xff;
-            let lookup_value = self.table.table[lookup_id as usize];
-            self.value = lookup_value ^ self.value >> 8;
+            self.value = self.table.table[
+                ((self.value ^ *byte as u32) & 0xff) as usize
+            ] ^ self.value >> 8;
         }
     }
 
     pub(crate) fn udpate_with_bar(&mut self, data: &[u8], bar: &ProgressBar) {
         for chunk in data.chunks(0x100000) {
-            for byte in chunk.iter() {
-                let lookup_id = (self.value ^ *byte as u32) & 0xff;
-                let lookup_value = self.table.table[lookup_id as usize];
-                self.value = lookup_value ^ self.value >> 8;
-            }
+            self.update(chunk);
             bar.inc(1)
         }
     }
@@ -89,8 +85,7 @@ impl Crc32Hasher {
         let mut buffer = [0; 0x100000];
         while let Ok(size) = reader.read(&mut buffer) {
             if size == 0 { break };
-            let data = &buffer[0..size];
-            crc32.update(data)
+            crc32.update(&buffer[0..size])
         }
         crc32
     }
