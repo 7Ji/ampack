@@ -718,21 +718,11 @@ impl Image {
         Ok(())
     }
 
-    fn guess_align_size(&self) -> u32 {
-        if self.find_item("super", "PARTITION").is_err() {
-            return 4
-        }
-        for item in self.items.iter() {
-            if item.extension != "PARTITION" {
-                continue
-            }
-            if item.stem.ends_with("_a") {
-                println!("Use align size 8 for images >= Android 11 with super \
-                    partition and A/B partitioning");
-                return 8
-            }
-        }
-        4
+    pub(crate) fn set_ver_align(&mut self, ver: ImageVersion, align: u8) {
+        self.version = ver;
+        self.align = ((align + 3) >> 2 << 2) as u32;
+        println!("Image version set to {}, alignment set to {}", 
+            self.version, self.align);
     }
 }
 
@@ -887,7 +877,7 @@ impl TryFrom<&Image> for ImageToWrite {
 
     fn try_from(image: &Image) -> Result<Self> {
         let mut image_to_write = Self {
-            head: RawImageHead::new(&image.version, image.guess_align_size()),
+            head: RawImageHead::new(&image.version, image.align),
             infos: Vec::new(),
             sha1sums: Vec::new(),
             data_head_infos: Vec::new(),
@@ -974,7 +964,7 @@ impl TryFrom<&Image> for ImageToWrite {
         let pointer = 
             image_to_write.data_head_infos.as_ptr() as *mut u32;
         unsafe {*pointer = crc32_hasher.value};
-        println!("CRC32 of image is {:x}", crc32_hasher.value);
+        println!("CRC32 of image is 0x{:08x}", crc32_hasher.value);
         Ok(image_to_write)
     }
 }
