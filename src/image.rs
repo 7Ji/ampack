@@ -718,11 +718,33 @@ impl Image {
         Ok(())
     }
 
+    fn guess_align_size(&self) -> u32 {
+        if self.find_item("super", "PARTITION").is_err() {
+            return 4
+        }
+        for item in self.items.iter() {
+            if item.extension != "PARTITION" {
+                continue
+            }
+            if item.stem.ends_with("_a") {
+                println!("Both super partition and _a partition found, this \
+                    image is probably for Android >= 11");
+                return 8
+            }
+        }
+        4   
+    }
+
     pub(crate) fn set_ver_align(&mut self, ver: ImageVersion, align: u8) {
         self.version = ver;
         self.align = ((align + 3) >> 2 << 2) as u32;
         println!("Image version set to {}, alignment set to {}", 
             self.version, self.align);
+        let guessed_align = self.guess_align_size();
+        if guessed_align != self.align {
+            println!("Warning: alignment size guessed from image items is {}, \
+                but it's set as {}", guessed_align, self.align)
+        }
     }
 }
 
