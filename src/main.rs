@@ -24,6 +24,7 @@ mod crc32;
 mod error;
 mod image;
 mod pointer;
+mod progress;
 mod sha1sum;
 
 use error::{Error, Result};
@@ -96,7 +97,7 @@ fn verify<P: AsRef<Path>>(in_file: P) -> Result<()> {
     println!("Verifying image at '{}'", in_file.display());
     let image = Image::try_read_file(in_file)?;
     image.verify()?;
-    image.print_table_stdout();
+    image.print_table_stdout()?;
     println!("Verified image at '{}'", in_file.display());
     Ok(())
 }
@@ -113,7 +114,7 @@ where
     if ! no_verify {
         image.verify()?
     }
-    image.print_table_stdout();
+    image.print_table_stdout()?;
     image.try_write_dir(out_dir)?;
     println!("Unpacked image '{}' to '{}'", in_file.display(), out_dir.display());
     Ok(())
@@ -130,14 +131,14 @@ where
     println!("Converting image '{}' to '{}'", in_file.display(), out_file.display());
     let mut image = Image::try_read_file(in_file)?;
     if no_verify {
-        image.print_table_stdout();
+        image.print_table_stdout()?;
         image.clear_verify()
     } else {
         image.verify()?;
-        image.print_table_stdout()
+        image.print_table_stdout()?
     }
     image.fill_verify()?;
-    image.print_table_stdout();
+    image.print_table_stdout()?;
     image.set_ver_align(out_ver, out_align);
     image.try_write_file(out_file)?;
     println!("Converted image '{}' to '{}'", in_file.display(), out_file.display());
@@ -154,9 +155,9 @@ where
     let out_file = out_file.as_ref();
     println!("Packing '{}' to '{}'", in_dir.display(), out_file.display());
     let mut image = Image::try_read_dir(&in_dir)?;
-    image.print_table_stdout();
+    image.print_table_stdout()?;
     image.fill_verify()?;
-    image.print_table_stdout();
+    image.print_table_stdout()?;
     image.set_ver_align(out_ver, out_align);
     image.try_write_file(out_file)?;
     println!("Packed '{}' to '{}'", in_dir.display(), out_file.display());

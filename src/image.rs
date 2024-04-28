@@ -19,10 +19,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use std::{cmp::{min, Ordering}, ffi::CStr, fmt::Display, fs::{create_dir_all, read_dir, remove_dir_all, remove_file, File}, io::{Read, Seek, Write}, path::Path, time::Duration};
 
 use cli_table::{Cell, Style, Table, format::Justify};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::MultiProgress;
 use serde::{Serialize, Deserialize};
 
-use crate::{sha1sum::Sha1sum, Error, Result};
+use crate::{progress::{progress_bar_with_template, progress_bar_with_template_multi}, sha1sum::Sha1sum, Error, Result};
 
 /* These values are always the same for any images */
 
@@ -366,29 +366,43 @@ impl Image {
         let _ = self.find_essentials();
         let need_verifies: Vec<&Item> = self.items.iter().filter(
             |item|item.sha1sum.is_some()).collect();
-        let multiprogress = MultiProgress::new();
-        let mut mapped: Vec<(&Item, String, ProgressBar)> = need_verifies.iter().map(
-        |item|
-        {
+        let multi_progress = MultiProgress::new();
+        let template_prefix = 
+            "Verifying item => [{elapsed_precise}] {bar:40.cyan/blue} \
+            {pos:>5}/{len:>5} MiB ".to_string();
+        let mut mapped = Vec::new();
+        for item in need_verifies.iter() {
             let name = format!("{}.{}", item.stem, item.extension);
-            let progress_bar = multiprogress.add(ProgressBar::new(item.data.len() as u64 / 0x100000));
-            progress_bar.set_style(ProgressStyle::with_template(&format!("Verifying item => {} {}", "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>5}/{len:>5} MiB", name)).unwrap());
-            progress_bar.set_message("Waiting for start...");
-            (*item, name, progress_bar)
-        }).collect();
+            let mut template = template_prefix.clone();
+            template.push_str(&name);
+            let progress_bar = progress_bar_with_template_multi(
+                &multi_progress, 
+                item.data.len() as u64 / 0x100000, 
+                &template)?;
+            mapped.push((*item, name, progress_bar))
+        }
         use rayon::prelude::*;
         let result = mapped.par_iter_mut().map(|(item, name, progress_bar)| {
-            let sha1sum_record = item.sha1sum.as_ref().expect("Sha1sum not recorded");
+            let sha1sum_record = match &item.sha1sum {
+                Some(sha1sum) => sha1sum,
+                None => {
+                    eprintln!("Verify item not found for {}.{}", 
+                        &item.stem, &item.extension);
+                    return Err(ImageError::MissingItem { 
+                        stem: item.stem.clone(), extension: "VERIFY".into()
+                    }.into());
+                },
+            };
             let sha1sum_calculated = Sha1sum::from_data_with_bar(&item.data, progress_bar);
             if sha1sum_record != &sha1sum_calculated {
                 eprintln!("Recorded SHA1sum ({}) different from calculated \
                     SHA1sum ({}) for item '{}'", sha1sum_record, 
                     sha1sum_calculated, name);
-                return Err(Error::ImageError(ImageError::IllegalVerify));
+                return Err(ImageError::IllegalVerify.into());
             }
             Ok(())
         }).find_first(|r|r.is_err());
-        multiprogress.clear().unwrap();
+        multi_progress.clear()?;
         if let Some(r) = result {
             if let Err(e) = r {
                 return Err(e)
@@ -408,21 +422,26 @@ impl Image {
     pub(crate) fn fill_verify(&mut self) -> Result<()> {
         let mut need_verifies: Vec<&mut Item> = self.items.iter_mut().filter(
             |item|item.sha1sum.is_none()).collect();
-        let multiprogress = MultiProgress::new();
-        let mut mapped: Vec<(&Item, ProgressBar)> = need_verifies.iter().map(
-        |item|
-        {
+        let multi_progress = MultiProgress::new();
+        let mut mapped = Vec::new();
+        let template_prefix = 
+            "Generating verify => [{elapsed_precise}] {bar:40.cyan/blue} \
+            {pos:>5}/{len:>5} MiB ".to_string();
+        for item in need_verifies.iter_mut() {
             let name = format!("{}.{}", item.stem, item.extension);
-            let progress_bar = multiprogress.add(ProgressBar::new(item.data.len() as u64 / 0x100000));
-            progress_bar.set_style(ProgressStyle::with_template(&format!("Generating verify => {} {}", "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>5}/{len:>5} MiB", name)).unwrap());
-            progress_bar.set_message("Waiting for start...");
-            (item as &Item, progress_bar)
-        }).collect();
+            let mut template = template_prefix.clone();
+            template.push_str(&name);
+            let progress_bar = progress_bar_with_template_multi(
+                &multi_progress, 
+                item.data.len() as u64 / 0x100000,
+                &template)?;
+            mapped.push((item, progress_bar))
+        }
         use rayon::prelude::*;
         let sha1sums: Vec<Sha1sum> = mapped.par_iter_mut().map(|(item, progress_bar)| {
             Sha1sum::from_data_with_bar(&item.data, progress_bar)
         }).collect();
-        multiprogress.clear().unwrap();
+        multi_progress.clear()?;
         for (item, sha1sum) in need_verifies.iter_mut().zip(sha1sums.into_iter()) {
             item.sha1sum = Some(sha1sum)
         }
@@ -448,9 +467,10 @@ impl Image {
         let mut items = Vec::new();
         let mut need_verify: Option<Item> = None;
         let mut rows = Vec::new();
-        let progress_bar = ProgressBar::new(header.item_count.into());
-        progress_bar.set_style(ProgressStyle::with_template(
-            "Reading image => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}").unwrap());
+        let progress_bar = progress_bar_with_template(
+            header.item_count.into(), 
+            "Reading image => [{elapsed_precise}] {bar:40.cyan/blue} \
+                                        {pos:>7}/{len:7} {msg}")?;
         progress_bar.enable_steady_tick(Duration::from_secs(1));
         for item_id in 0..header.item_count {
             file.seek(std::io::SeekFrom::Start(
@@ -549,7 +569,7 @@ impl Image {
             return Err(ImageError::UnmatchedVerify.into())
         }
         println!("Item infos in raw image:");
-        cli_table::print_stdout(table).unwrap();
+        cli_table::print_stdout(table)?;
         Ok(Self {
             version,
             align: header.item_align_size,
@@ -565,9 +585,10 @@ impl Image {
             let entry = entry?;
             entries.push(entry)
         }
-        let progress_bar = ProgressBar::new(entries.len() as u64);
-        progress_bar.set_style(ProgressStyle::with_template(
-            "Reading items => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>3}/{len:3} {msg}").unwrap());
+        let progress_bar = progress_bar_with_template(
+            entries.len() as u64, 
+            "Reading items => [{elapsed_precise}] {bar:40.cyan/blue} \
+                                        {pos:>3}/{len:3} {msg}")?;
         progress_bar.enable_steady_tick(Duration::from_secs(1));
         let mut uboot_usb = None;
         let mut ddr_usb = None;
@@ -646,7 +667,7 @@ impl Image {
         })
     }
 
-    pub(crate) fn print_table_stdout(&self) -> () {
+    pub(crate) fn print_table_stdout(&self) -> Result<()> {
         println!("Items in image:");
         let mut rows = Vec::new();
         for (id, item) in self.items.iter().enumerate() {
@@ -669,7 +690,8 @@ impl Image {
             cell_bold_center!("size"),
             cell_bold_center!("sha1sum")
         ]).bold(true);
-        cli_table::print_stdout(table).unwrap();
+        cli_table::print_stdout(table)?;
+        Ok(())
     }
 
     pub(crate) fn try_write_dir<P: AsRef<Path>>(&self, dir: P) -> Result<()> {
@@ -682,9 +704,10 @@ impl Image {
             }
         }
         create_dir_all(parent)?;
-        let progress_bar = ProgressBar::new(self.items.len() as u64);
-        progress_bar.set_style(ProgressStyle::with_template(
-            "Writing items => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}").unwrap());
+        let progress_bar = progress_bar_with_template(
+            self.items.len() as u64, 
+            "Writing items => [{elapsed_precise}] {bar:40.cyan/blue} \
+                                        {pos:>7}/{len:7} {msg}")?;
         progress_bar.enable_steady_tick(Duration::from_secs(1));
         for item in self.items.iter() {
             let name = format!("{}.{}", item.stem, item.extension);
@@ -699,14 +722,11 @@ impl Image {
     pub(crate) fn try_write_file<P: AsRef<Path>>(&self, file: P) -> Result<()> {
         let image_to_write = ImageToWrite::try_from(self)?;
         let mut out_file = File::create(file.as_ref())?;
-        let progress_bar = ProgressBar::new(
+        let progress_bar = progress_bar_with_template(
             ((image_to_write.data_head_infos.len() + 
-                    image_to_write.data_body.len()) / 0x100000) as u64);
-        progress_bar.set_style(ProgressStyle::with_template(
-            "Writing image => \
-                [{elapsed_precise}] {bar:40.cyan/blue} {pos:>5}/{len:5} MiB"
-            ).unwrap());
-        // progress_bar.enable_steady_tick(Duration::from_secs(1));
+                    image_to_write.data_body.len()) / 0x100000) as u64,
+            "Writing image => [{elapsed_precise}] {bar:40.cyan/blue} \
+                                        {pos:>5}/{len:5} MiB")?;
         for chunk in 
             image_to_write.data_head_infos.chunks(0x100000).chain(
                 image_to_write.data_body.chunks(0x100000)) 
@@ -955,9 +975,10 @@ impl TryFrom<&Image> for ImageToWrite {
             },
         };
         generic_items.sort_by(sort_ref_items_by_name);
-        let progress_bar = ProgressBar::new(image.items.len() as u64);
-        progress_bar.set_style(ProgressStyle::with_template(
-            "Combining image => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>3}/{len:3} {msg}").unwrap());
+        let progress_bar = progress_bar_with_template(
+            image.items.len() as u64,
+            "Combining image => [{elapsed_precise}] {bar:40.cyan/blue} \
+                                            {pos:>3}/{len:3} {msg}")?;
         progress_bar.set_message("DDR.USB");
         image_to_write.append_item(ddr_usb)?;
         progress_bar.inc(1);
@@ -972,12 +993,12 @@ impl TryFrom<&Image> for ImageToWrite {
         progress_bar.set_message("finalizing...");
         progress_bar.finish_and_clear();
         image_to_write.finalize(&image.version)?;
-        let progress_bar = ProgressBar::new(
+        let progress_bar = progress_bar_with_template(
             ((image_to_write.data_head_infos.len() + 
                     image_to_write.data_body.len() - 4) / 0x100000
-                ) as u64);
-        progress_bar.set_style(ProgressStyle::with_template(
-            "Calculating CRC32 => [{elapsed_precise}] {bar:40.cyan/blue} {pos:>5}/{len:5} MiB").unwrap());
+                ) as u64,
+            "Calculating CRC32 => [{elapsed_precise}] {bar:40.cyan/blue} \
+                {pos:>5}/{len:5} MiB")?;
         let mut crc32_hasher = crate::crc32::Crc32Hasher::new();
         crc32_hasher.udpate_with_bar(&image_to_write.data_head_infos[4..], &progress_bar);
         crc32_hasher.udpate_with_bar(&image_to_write.data_body, &progress_bar);

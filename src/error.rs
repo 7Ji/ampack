@@ -23,6 +23,7 @@ pub(crate) enum Error {
     IOError (std::io::Error),
     NulError (std::ffi::NulError),
     FromHexError (hex::FromHexError),
+    TemplateError (indicatif::style::TemplateError),
     ImageError (crate::image::ImageError),
 }
 
@@ -44,18 +45,25 @@ impl From<hex::FromHexError> for Error {
     }
 }
 
+impl From<indicatif::style::TemplateError> for Error {
+    fn from(value: indicatif::style::TemplateError) -> Self {
+        Self::TemplateError(value)
+    }
+}
+
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Error: ")?;
         match self {
             Error::IOError(e) => 
-                write!(f, "{}", e),
+                write!(f, "IO Error: {}", e),
             Error::NulError(e) => 
-                write!(f, "{}", e),
+                write!(f, "Nul Error: {}", e),
             Error::FromHexError(e) => 
-                write!(f, "{}", e),
-            Error::ImageError(e) => 
-                write!(f, "{}", e),
+                write!(f, "From Hex Error: {}", e),
+            Error::TemplateError(e) =>
+                write!(f, "Progress Error: {}", e),
+            Error::ImageError(e) =>
+                write!(f, "Image Error: {}", e),
         }
     }
 }
