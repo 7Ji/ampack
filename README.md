@@ -70,6 +70,11 @@ ampack crc32 [in file]
 ```
 Calculate the crc32 checksum value of an image file at `[in file]`, mostly for debugging purpose when checking `ampack`'s accuracy.
 
+## See also
+- [ampart](https://github.com/7Ji/ampart): A partition tool for Amlogic's proprietary emmc partition format, useful to modify the partition infos embedded in the extracted DTB file(s)
+- [hepacker](https://github.com/HybridELEC/hepacker): HybridELEC image packer, using this tool to unpack stock Android image, ampart to modify partitions, and this tool again to repack to an image with CoreELEC and EmuELEC embedded.
+- [HybridELEC](https://github.com/HybridELEC/HybridELEC): Android + CoreELEC + EmuELEC 3in1 burning image made using this tool
+
 ## License
 **AMpack**, a tool to unpack / (re)pack AMLogic burning images
 
