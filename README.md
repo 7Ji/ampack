@@ -10,6 +10,8 @@ cargo build --release
 ```
 The result binary would be `target/release/ampack`
 
+You can also install from the AUR package [ampack-git](https://aur.archlinux.org/packages/ampack-git) on Arch Linux.
+
 ## Usage
 ```
 Usage: ampack [OPTIONS] <COMMAND>
