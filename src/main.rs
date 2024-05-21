@@ -23,7 +23,6 @@ use clap::Parser;
 mod crc32;
 mod error;
 mod image;
-mod pointer;
 mod progress;
 mod sha1sum;
 

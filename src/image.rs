@@ -16,7 +16,7 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use std::{cmp::{min, Ordering}, ffi::CStr, fmt::Display, fs::{create_dir_all, read_dir, remove_dir_all, remove_file, File}, io::{Read, Seek, Write}, path::Path, time::Duration};
+use std::{cmp::{min, Ordering}, ffi::{c_char, CStr}, fmt::Display, fs::{create_dir_all, read_dir, remove_dir_all, remove_file, File}, io::{Read, Seek, Write}, path::Path, time::Duration};
 
 use cli_table::{Cell, Style, Table, format::Justify};
 use indicatif::MultiProgress;
@@ -191,7 +191,7 @@ const SIZE_RAW_ITEM_INFO_V2: usize = std::mem::size_of::<RawItemInfoV2>();
 // const SIZE_RAW_ITEM_INFO_V3: usize = std::mem::size_of::<RawItemInfoV3>();
 
 fn cstr_from_slice_u8_c_string(slice: &[u8]) -> &CStr {
-    unsafe {CStr::from_ptr(slice.as_ptr() as *const i8)}
+    unsafe {CStr::from_ptr(slice.as_ptr() as *const c_char)}
 }
 
 fn string_from_slice_u8_c_string(slice: &[u8]) -> String {
