@@ -49,10 +49,14 @@ pub(crate) enum ImageError {
         stem: String,
         extension: String,
     },
+    UnexpectedItem {
+        stem: String,
+        extension: String,
+    },
     SizeMismatch {
         exptected: usize,
         actual: usize
-    }
+    },
 }
 
 impl Into<Error> for ImageError {
@@ -77,6 +81,8 @@ impl Display for ImageError {
                 write!(f, "Duplicated Item '{}.{}'", stem, extension),
             ImageError::MissingItem { stem, extension } => 
                 write!(f, "Missing Item '{}.{}'", stem, extension),
+            ImageError::UnexpectedItem { stem, extension } =>
+                write!(f, "Unexpected Item '{}.{}'", stem, extension),
             ImageError::SizeMismatch { exptected, actual } => 
                 write!(f, "Size Mismatch (expected {} != actual {})",
                     exptected, actual),
@@ -781,7 +787,7 @@ impl ImageToWrite {
         for (id, (item_sha1sum, item_info)) in 
             self.sha1sums.iter().zip(self.infos.iter()).enumerate() 
         {
-            if sha1sum == item_sha1sum {
+            if sha1sum == item_sha1sum && ! (item_info.item_main_type == "USB" && item_info.item_sub_type.ends_with("_ENC")) {
                 return (1, id as u16, item_info.offset_in_image)
             }
         }
@@ -789,7 +795,6 @@ impl ImageToWrite {
     }
 
     fn append_item(&mut self, item: &Item) -> Result<()>{
-        // println!("Appending item to ")
         let sha1sum = if let Some(sha1sum) = &item.sha1sum {
             sha1sum
         } else {
@@ -801,7 +806,6 @@ impl ImageToWrite {
             = self.find_backup(sha1sum);
         let mut offset = offset as usize;
         let align_size = self.head.item_align_size as usize;
-        
         if is_backup_item == 0 { // Not a backup item
             offset = (self.data_body.len() + align_size - 1) / align_size * align_size;
             for _ in self.data_body.len() .. offset {
@@ -833,19 +837,15 @@ impl ImageToWrite {
         self.head.item_count += 1;
         offset += item.data.len();
         if item.extension == "PARTITION" {
-            if is_backup_item == 0 {
-                let content = format!("sha1sum {}", sha1sum);
-                let bytes = content.as_bytes();
-                if bytes.len() != 48 {
-                    eprintln!("sha1sum content length != 40");
-                    return Err(ImageError::SizeMismatch { 
-                        exptected: 48, actual: bytes.len() }.into());
-                }
-                self.data_body.extend_from_slice(bytes);
-                self.sha1sums.push(Sha1sum::from_data(bytes));
-            } else {
-                self.sha1sums.push(self.sha1sums[backup_item_id as usize].clone());
+            let content = format!("sha1sum {}", sha1sum);
+            let bytes = content.as_bytes();
+            if bytes.len() != 48 {
+                eprintln!("sha1sum content length != 40");
+                return Err(ImageError::SizeMismatch { 
+                    exptected: 48, actual: bytes.len() }.into());
             }
+            self.data_body.extend_from_slice(bytes);
+            self.sha1sums.push(Sha1sum::from_data(bytes));
             self.infos.push(RawItemInfo { 
                 item_id: self.infos.len() as u32, 
                 file_type: 0, 
@@ -927,32 +927,32 @@ impl TryFrom<&Image> for ImageToWrite {
         };
         let mut ddr_usb = None;
         let mut uboot_usb = None;
+        let mut ddr_enc_usb = None;
+        let mut uboot_enc_usb = None;
         let mut generic_items = Vec::new();
         for item in image.items.iter() {
             if item.extension == "USB" {
-                match item.stem.as_str() {
-                    "DDR" => {
-                        if ddr_usb.is_some() {
-                            eprintln!("Duplicated DDR.USB, refuse to write");
-                            return Err(ImageError::DuplicatedItem { 
-                                stem: "DDR".into(), 
-                                extension: "USB".into() }.into())
+                let stem = item.stem.as_str();
+                let item_usb =
+                    match stem {
+                        "DDR" => &mut ddr_usb,
+                        "UBOOT" => &mut uboot_usb,
+                        "DDR_ENC" => &mut ddr_enc_usb,
+                        "UBOOT_ENC" => &mut uboot_enc_usb,
+                        _ => {
+                            eprintln!("Unexpected {}.USB, refuse to write", 
+                                item.stem);
+                            return Err(ImageError::UnexpectedItem { 
+                                stem: stem.into(), extension: "USB".into() 
+                            }.into())
                         }
-                        ddr_usb = Some(item);
-                    },
-                    "UBOOT" => {
-                        if uboot_usb.is_some() {
-                            eprintln!("Duplicated UBOOT.USB, refuse to write");
-                            return Err(ImageError::DuplicatedItem { 
-                                stem: "UBOOT".into(), 
-                                extension: "USB".into() }.into())
-                        }
-                        uboot_usb = Some(item);
-                    },
-                    _ => {
-                        println!("Warning: unexpected {}.USB", item.stem);
-                        generic_items.push(item)
-                    }
+                    };
+                if item_usb.is_some() {
+                    eprintln!("Duplicated {}.USB, refuse to write", stem);
+                    return Err(ImageError::DuplicatedItem { 
+                        stem: stem.into(), extension: "USB".into() }.into())
+                } else {
+                    *item_usb = Some(item)
                 }
             } else {
                 generic_items.push(item)
@@ -979,12 +979,26 @@ impl TryFrom<&Image> for ImageToWrite {
             image.items.len() as u64,
             "Combining image => [{elapsed_precise}] {bar:40.cyan/blue} \
                                             {pos:>3}/{len:3} {msg}")?;
+
         progress_bar.set_message("DDR.USB");
         image_to_write.append_item(ddr_usb)?;
         progress_bar.inc(1);
+
+        if let Some(ddr_enc_usb) = ddr_enc_usb {
+            progress_bar.set_message("DDR_ENC.USB");
+            image_to_write.append_item(ddr_enc_usb)?;
+            progress_bar.inc(1);
+        }
+
         progress_bar.set_message("UBOOT.USB");
         image_to_write.append_item(uboot_usb)?;
         progress_bar.inc(1);
+
+        if let Some(uboot_enc_usb) = uboot_enc_usb {
+            progress_bar.set_message("UBOOT_ENC.USB");
+            image_to_write.append_item(uboot_enc_usb)?;
+            progress_bar.inc(1);
+        }
         for item in generic_items.iter_mut() {
             progress_bar.set_message(format!("{}.{}", item.stem, item.extension));
             image_to_write.append_item(item)?;
