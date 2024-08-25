@@ -605,27 +605,27 @@ impl Image {
         for entry in entries {
             progress_bar.set_message(entry.file_name().to_string_lossy().into_owned());
             let path_entry = entry.path();
-            let stem = match path_entry.file_stem() {
-                Some(stem) => stem,
+            let file_name = match path_entry.file_name() {
+                Some(file_name) => file_name.to_string_lossy(),
                 None => {
-                    progress_bar.inc(1);
-                    continue
+                    return Err(Error::IOError(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "Cannot figure out the file name of part")));
                 },
             };
-            let extension = match path_entry.extension() {
-                Some(extension) => extension,
-                None => {
-                    progress_bar.inc(1);
-                    continue
-                },
+            let (stem, extension) = match 
+                file_name.split_once('.') 
+            {
+                Some((stem, extension)) => (stem, extension),
+                None => continue,
             };
             let mut data = Vec::new();
             let mut file = File::open(&path_entry)?;
             file.read_to_end(&mut data)?;
             let item = Item {
                 data,
-                extension: extension.to_string_lossy().into(),
-                stem: stem.to_string_lossy().into(),
+                extension: extension.into(),
+                stem: stem.into(),
                 sha1sum: None,
             };
             match (item.stem.as_ref(), item.extension.as_ref()) {
