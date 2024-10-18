@@ -804,15 +804,17 @@ impl ImageToWrite {
         };
         let (is_backup_item, backup_item_id, offset) 
             = self.find_backup(sha1sum);
-        let mut offset = offset as usize;
         let align_size = self.head.item_align_size as usize;
-        if is_backup_item == 0 { // Not a backup item
-            offset = (self.data_body.len() + align_size - 1) / align_size * align_size;
+        let offset = if is_backup_item !=0 {
+            offset as usize
+        } else {
+            let offset = (self.data_body.len() + align_size - 1) / align_size * align_size;
             for _ in self.data_body.len() .. offset {
                 self.data_body.push(0)
             }
             self.data_body.extend_from_slice(&item.data);
-        }
+            offset
+        };
         let info = RawItemInfo {
             item_id: self.infos.len() as u32,
             file_type: 
@@ -835,8 +837,12 @@ impl ImageToWrite {
         self.infos.push(info);
         self.sha1sums.push(sha1sum.clone());
         self.head.item_count += 1;
-        offset += item.data.len();
         if item.extension == "PARTITION" {
+            let offset = if is_backup_item != 0 {
+                self.data_body.len()
+            } else {
+                offset + item.data.len()
+            };
             let content = format!("sha1sum {}", sha1sum);
             let bytes = content.as_bytes();
             if bytes.len() != 48 {
