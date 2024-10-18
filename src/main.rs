@@ -63,7 +63,10 @@ enum Action {
         out_ver: ImageVersion,
         /// Alignment of the output image, multiply of 4, 8 for Android >= 11
         #[arg(long, default_value_t = 4)]
-        out_align: u8
+        out_align: u8,
+        /// Verify the output image after conversion
+        #[arg(long)]
+        verify: bool,
     },
     /// (Re)pack partition files into an image
     Pack {
@@ -76,7 +79,10 @@ enum Action {
         out_ver: ImageVersion,
         /// Alignment of the output image, multiply of 4, 8 for Android >= 11
         #[arg(long, default_value_t = 4)]
-        out_align: u8
+        out_align: u8,
+        /// Verify the output image after packing
+        #[arg(long)]
+        verify: bool,
     },
     /// Calculate the CRC32 checksum of an image
     Crc32 {
@@ -119,8 +125,9 @@ where
     Ok(())
 }
 
-fn convert<P1, P2>(in_file: P1, out_file: P2, no_verify: bool, 
-                    out_ver: ImageVersion, out_align: u8) -> Result<()>
+fn convert<P1, P2>(in_file: P1, out_file: P2, no_verify: bool,
+                    out_ver: ImageVersion, out_align: u8, do_verify: bool)
+-> Result<()>
 where
     P1: AsRef<Path>,
     P2: AsRef<Path>
@@ -141,11 +148,15 @@ where
     image.set_ver_align(out_ver, out_align);
     image.try_write_file(out_file)?;
     println!("Converted image '{}' to '{}'", in_file.display(), out_file.display());
+    if do_verify {
+        verify(out_file)?
+    }
     Ok(())
 }
 
-fn pack<P1, P2>(in_dir: P1, out_file: P2, out_ver: ImageVersion, out_align: u8) 
-    -> Result<()> 
+fn pack<P1, P2>(in_dir: P1, out_file: P2, out_ver: ImageVersion,
+    out_align: u8, do_verify: bool)
+-> Result<()>
 where
     P1: AsRef<Path>,
     P2: AsRef<Path>
@@ -160,6 +171,9 @@ where
     image.set_ver_align(out_ver, out_align);
     image.try_write_file(out_file)?;
     println!("Packed '{}' to '{}'", in_dir.display(), out_file.display());
+    if do_verify {
+        verify(out_file)?
+    }
     Ok(())
 }
 
@@ -176,8 +190,8 @@ fn main() -> Result<()> {
     match arg.action {
         Action::Verify { in_file } => verify(in_file),
         Action::Unpack { in_file, out_dir , no_verify} => unpack(in_file, out_dir, no_verify),
-        Action::Convert { in_file, out_file, no_verify, out_ver, out_align } => convert(in_file, out_file, no_verify, out_ver, out_align),
-        Action::Pack { in_dir, out_file, out_ver, out_align } => pack(in_dir, out_file, out_ver, out_align),
+        Action::Convert { in_file, out_file, no_verify, out_ver, out_align, verify } => convert(in_file, out_file, no_verify, out_ver, out_align, verify),
+        Action::Pack { in_dir, out_file, out_ver, out_align, verify } => pack(in_dir, out_file, out_ver, out_align, verify),
         Action::Crc32 { in_file } => do_crc32(in_file),
     }
 }
